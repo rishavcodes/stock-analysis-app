@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm search:*)",
+      "Bash(npm view:*)",
+      "Skill(claude-api)",
+      "Skill(claude-api:*)",
+      "WebSearch",
+      "Bash(npm pack:*)",
+      "Bash(npm install:*)",
+      "Bash(npx create-next-app@latest frontend --typescript --tailwind --eslint --app --src-dir --no-import-alias --use-npm)",
+      "Bash(npx tsc:*)",
+      "Bash(npx next:*)",
+      "Bash(npx ts-node:*)",
+      "Bash(node -e \"const { SmartAPI } = require\\(''smartapi-javascript''\\); const s = new SmartAPI\\({ api_key: ''test'' }\\); console.log\\(Object.getOwnPropertyNames\\(Object.getPrototypeOf\\(s\\)\\).sort\\(\\).join\\(''\\\\n''\\)\\)\")",
+      "Bash(node -e \"const { SmartAPI } = require\\(''smartapi-javascript''\\); const s = new SmartAPI\\({ api_key: ''test'' }\\); console.log\\(Object.keys\\(s\\).sort\\(\\).join\\(''\\\\n''\\)\\)\")",
+      "Bash(node -e \"const { SmartAPI } = require\\(''smartapi-javascript''\\); console.log\\(new SmartAPI\\({ api_key: ''test'' }\\).marketData.toString\\(\\)\\)\")"
+    ]
+  }
+}
