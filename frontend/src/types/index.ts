@@ -164,4 +164,7 @@ export interface StockDetail {
   metrics: StockMetric | null;
   candles: Candle[];
   analysis: Analysis | null;
+  lastPrice: number | null;
+  change: number | null;
+  changePercent: number | null;
 }

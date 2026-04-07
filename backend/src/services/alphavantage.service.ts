@@ -35,9 +35,8 @@ export class AlphaVantageService {
     return this.dailyCallCount < ALPHA_VANTAGE.MAX_DAILY_CALLS;
   }
 
-  /** Format NSE symbol for Alpha Vantage (e.g., RELIANCE -> RELIANCE.BSE) */
-  private formatSymbol(nseSymbol: string): string {
-    return `${nseSymbol}.BSE`;
+  private formatSymbol(nseSymbol: string, exchange: 'NSE' | 'BSE' = 'NSE'): string {
+    return `${nseSymbol}.${exchange}`;
   }
 
   private parseNumber(value: string | undefined): number | null {
@@ -46,78 +45,85 @@ export class AlphaVantageService {
     return isNaN(num) ? null : num;
   }
 
-  /** Fetch company overview (fundamentals) */
+  private parseOverviewData(data: Record<string, string>): CompanyOverview {
+    return {
+      pe: this.parseNumber(data['TrailingPE']),
+      roe: this.parseNumber(data['ReturnOnEquityTTM']),
+      roce: this.parseNumber(data['ReturnOnAssetsTTM']),
+      debtToEquity: this.parseNumber(data['DebtToEquityRatio'])
+        ? this.parseNumber(data['DebtToEquityRatio'])! / 100
+        : null,
+      revenueGrowthYoY: this.parseNumber(data['QuarterlyRevenueGrowthYOY']),
+      profitGrowthYoY: this.parseNumber(data['QuarterlyEarningsGrowthYOY']),
+      profitMargin: this.parseNumber(data['ProfitMargin']),
+      marketCap: this.parseNumber(data['MarketCapitalization']),
+      bookValue: this.parseNumber(data['BookValue']),
+      dividendYield: this.parseNumber(data['DividendYield']),
+    };
+  }
+
+  /** Fetch company overview — tries .NSE first, then .BSE */
   async getCompanyOverview(symbol: string): Promise<CompanyOverview | null> {
-    if (!this.checkQuota()) {
-      logger.warn('Alpha Vantage daily quota exhausted');
-      return null;
-    }
-
-    try {
-      this.dailyCallCount++;
-      const response = await axios.get(BASE_URL, {
-        params: {
-          function: 'OVERVIEW',
-          symbol: this.formatSymbol(symbol),
-          apikey: env.ALPHA_VANTAGE_API_KEY,
-        },
-      });
-
-      const data = response.data;
-
-      if (data['Note'] || data['Information']) {
-        logger.warn(`Alpha Vantage rate limited for ${symbol}`);
+    for (const exchange of ['NSE', 'BSE'] as const) {
+      if (!this.checkQuota()) {
+        logger.warn('Alpha Vantage daily quota exhausted');
         return null;
       }
 
-      if (!data['Symbol']) {
-        logger.warn(`No Alpha Vantage data for ${symbol}`);
-        return null;
-      }
+      try {
+        this.dailyCallCount++;
+        const response = await axios.get(BASE_URL, {
+          params: {
+            function: 'OVERVIEW',
+            symbol: this.formatSymbol(symbol, exchange),
+            apikey: env.ALPHA_VANTAGE_API_KEY,
+          },
+        });
 
-      return {
-        pe: this.parseNumber(data['TrailingPE']),
-        roe: this.parseNumber(data['ReturnOnEquityTTM']),
-        roce: this.parseNumber(data['ReturnOnAssetsTTM']), // Closest available
-        debtToEquity: this.parseNumber(data['DebtToEquityRatio'])
-          ? this.parseNumber(data['DebtToEquityRatio'])! / 100
-          : null,
-        revenueGrowthYoY: this.parseNumber(data['QuarterlyRevenueGrowthYOY']),
-        profitGrowthYoY: this.parseNumber(data['QuarterlyEarningsGrowthYOY']),
-        profitMargin: this.parseNumber(data['ProfitMargin']),
-        marketCap: this.parseNumber(data['MarketCapitalization']),
-        bookValue: this.parseNumber(data['BookValue']),
-        dividendYield: this.parseNumber(data['DividendYield']),
-      };
-    } catch (error) {
-      logger.error(`Alpha Vantage error for ${symbol}:`, error);
-      return null;
+        const data = response.data;
+
+        if (data['Note'] || data['Information']) {
+          logger.warn(`Alpha Vantage rate limited for ${symbol}.${exchange}`);
+          return null; // Rate limited — stop trying, don't waste quota
+        }
+
+        if (data['Symbol']) {
+          logger.info(`Alpha Vantage: found ${symbol} via .${exchange}`);
+          return this.parseOverviewData(data);
+        }
+
+        logger.debug(`No Alpha Vantage data for ${symbol}.${exchange}, trying next...`);
+      } catch (error) {
+        logger.error(`Alpha Vantage error for ${symbol}.${exchange}:`, error);
+      }
     }
+
+    logger.warn(`No Alpha Vantage data for ${symbol} on any exchange`);
+    return null;
   }
 
   /** Get income statement data */
   async getIncomeStatement(symbol: string): Promise<any | null> {
-    if (!this.checkQuota()) return null;
+    for (const exchange of ['NSE', 'BSE'] as const) {
+      if (!this.checkQuota()) return null;
 
-    try {
-      this.dailyCallCount++;
-      const response = await axios.get(BASE_URL, {
-        params: {
-          function: 'INCOME_STATEMENT',
-          symbol: this.formatSymbol(symbol),
-          apikey: env.ALPHA_VANTAGE_API_KEY,
-        },
-      });
+      try {
+        this.dailyCallCount++;
+        const response = await axios.get(BASE_URL, {
+          params: {
+            function: 'INCOME_STATEMENT',
+            symbol: this.formatSymbol(symbol, exchange),
+            apikey: env.ALPHA_VANTAGE_API_KEY,
+          },
+        });
 
-      if (response.data['Note'] || !response.data['annualReports']) {
-        return null;
+        if (response.data['Note'] || response.data['Information']) return null;
+        if (response.data['annualReports']) return response.data;
+      } catch (error) {
+        logger.error(`Alpha Vantage income statement error for ${symbol}.${exchange}:`, error);
       }
-
-      return response.data;
-    } catch (error) {
-      logger.error(`Alpha Vantage income statement error for ${symbol}:`, error);
-      return null;
     }
+    return null;
   }
 
   /** Get remaining daily quota */

@@ -1,5 +1,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { MarketDataService } from '../services/market-data.service';
+import { Stock } from '../models/Stock';
+import { SECTOR_MAP } from '../config/sector-map';
 
 const router = Router();
 const marketDataService = new MarketDataService();
@@ -19,6 +21,20 @@ router.get('/sectors', async (_req: Request, res: Response, next: NextFunction) 
   try {
     const sectors = await marketDataService.getSectorRankings();
     res.json({ success: true, data: sectors });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/market/update-sectors — Apply sector mapping to existing stocks
+router.post('/update-sectors', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    let updated = 0;
+    for (const [symbol, sector] of Object.entries(SECTOR_MAP)) {
+      const result = await Stock.updateOne({ symbol }, { $set: { sector } });
+      if (result.modifiedCount > 0) updated++;
+    }
+    res.json({ success: true, data: { message: `Updated sectors for ${updated} stocks` } });
   } catch (error) {
     next(error);
   }

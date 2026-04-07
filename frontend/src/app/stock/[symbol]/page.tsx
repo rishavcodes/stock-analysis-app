@@ -28,7 +28,7 @@ export default function StockDetailPage() {
     );
   }
 
-  const { stock, metrics, candles, analysis } = stockDetail;
+  const { stock, metrics, candles, analysis, lastPrice, change, changePercent } = stockDetail;
 
   return (
     <div className="space-y-6">
@@ -46,11 +46,25 @@ export default function StockDetailPage() {
             {stock.name} &middot; {stock.sector} &middot; {stock.exchange}
           </p>
         </div>
-        {metrics && <ScoreGauge score={metrics.finalScore} />}
+        <div className="flex items-center gap-6">
+          {lastPrice != null && (
+            <div className="text-right">
+              <p className="text-3xl font-bold">
+                {new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' }).format(lastPrice)}
+              </p>
+              {change != null && changePercent != null && (
+                <p className={`text-sm font-medium ${change >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                  {change >= 0 ? '+' : ''}{change.toFixed(2)} ({changePercent >= 0 ? '+' : ''}{changePercent.toFixed(2)}%)
+                </p>
+              )}
+            </div>
+          )}
+          {metrics && <ScoreGauge score={metrics.finalScore} />}
+        </div>
       </div>
 
       {/* Chart */}
-      {candles.length > 0 && <PriceChart candles={candles} />}
+      {candles.length > 0 && <PriceChart candles={candles} lastPrice={lastPrice} />}
 
       {/* Metrics & Analysis */}
       {metrics && (

@@ -1,10 +1,11 @@
 import { SmartAPIService } from './smartapi.service';
-import { AlphaVantageService } from './alphavantage.service';
+import { YahooFinanceService } from './yahoo-finance.service';
 import { Stock, IStock } from '../models/Stock';
 import { Candle } from '../models/Candle';
 import { StockMetric } from '../models/StockMetric';
 import { SectorData } from '../models/SectorData';
 import { INDEX_TOKENS, EXCHANGE, INTERVALS, ALPHA_VANTAGE } from '../config/constants';
+import { SECTOR_MAP } from '../config/sector-map';
 import { MarketStatus, IndexStatus, SectorRanking, CandleData } from '../types/market.types';
 import { isMarketOpen, formatSmartAPIDate, daysAgo } from '../utils/market-hours';
 import { IndicatorService } from './indicator.service';
@@ -13,14 +14,14 @@ import { logger } from '../utils/logger';
 
 export class MarketDataService {
   private smartApi: SmartAPIService;
-  private alphaVantage: AlphaVantageService;
+  private yahooFinance: YahooFinanceService;
   private indicatorService: IndicatorService;
   private scoringService: ScoringService;
   private initialized = false;
 
   constructor() {
     this.smartApi = new SmartAPIService();
-    this.alphaVantage = new AlphaVantageService();
+    this.yahooFinance = new YahooFinanceService();
     this.indicatorService = new IndicatorService();
     this.scoringService = new ScoringService();
   }
@@ -44,6 +45,7 @@ export class MarketDataService {
     let count = 0;
     for (const inst of nseStocks) {
       const symbol = inst.symbol.replace('-EQ', '');
+      const sector = SECTOR_MAP[symbol] || 'Unknown';
       await Stock.findOneAndUpdate(
         { token: inst.token },
         {
@@ -52,6 +54,7 @@ export class MarketDataService {
           name: inst.name || symbol,
           exchange: 'NSE',
           segment: 'EQ',
+          sector,
           isin: inst.isin || '',
           lotSize: parseInt(inst.lotsize) || 1,
           isIndex: false,
@@ -99,18 +102,42 @@ export class MarketDataService {
 
   /** Fetch daily candles for all active stocks */
   async fetchAllDailyCandles(): Promise<void> {
+    // Skip stocks that already have recent candle data (resume support)
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 2);
+
     const stocks = await Stock.find({ isActive: true, isIndex: false }).lean();
+    let done = 0;
+    let skipped = 0;
+
     logger.info(`Fetching daily candles for ${stocks.length} stocks...`);
 
     for (const stock of stocks) {
       try {
+        // Check if we already have recent data for this stock
+        const existing = await Candle.findOne({
+          stockToken: stock.token,
+          interval: 'ONE_DAY',
+          timestamp: { $gte: yesterday },
+        }).lean();
+
+        if (existing) {
+          skipped++;
+          continue;
+        }
+
         await this.fetchDailyCandles(stock.token, 365);
+        done++;
+
+        if (done % 100 === 0) {
+          logger.info(`Candle fetch progress: ${done} fetched, ${skipped} skipped, ${stocks.length - done - skipped} remaining`);
+        }
       } catch (error) {
         logger.error(`Failed to fetch candles for ${stock.symbol}:`, error);
       }
     }
 
-    logger.info('Finished fetching daily candles');
+    logger.info(`Finished fetching daily candles: ${done} fetched, ${skipped} skipped`);
   }
 
   /** Compute indicators and scores for all stocks */
@@ -210,7 +237,7 @@ export class MarketDataService {
     logger.info('Finished computing metrics for all stocks');
   }
 
-  /** Fetch fundamentals from Alpha Vantage for a batch of stocks */
+  /** Fetch fundamentals from Yahoo Finance for a batch of stocks */
   async fetchFundamentalsBatch(batchSize: number = 30): Promise<void> {
     // Get stocks that haven't been updated recently
     const cutoffDate = new Date(Date.now() - ALPHA_VANTAGE.CACHE_DAYS * 24 * 60 * 60 * 1000);
@@ -230,41 +257,50 @@ export class MarketDataService {
       if (needsUpdate.length >= batchSize) break;
     }
 
-    logger.info(`Fetching fundamentals for ${needsUpdate.length} stocks...`);
+    logger.info(`Fetching fundamentals for ${needsUpdate.length} stocks via Yahoo Finance...`);
+    let success = 0;
 
     for (const stock of needsUpdate) {
-      if (this.alphaVantage.getRemainingQuota() <= 0) {
-        logger.warn('Alpha Vantage quota exhausted, stopping batch');
-        break;
-      }
-
       try {
-        const overview = await this.alphaVantage.getCompanyOverview(stock.symbol);
-        if (overview) {
-          const today = new Date();
-          today.setHours(0, 0, 0, 0);
-
-          await StockMetric.findOneAndUpdate(
-            { symbol: stock.symbol, date: today },
+        const fundamentals = await this.yahooFinance.getCompanyFundamentals(stock.symbol);
+        if (fundamentals) {
+          // Update the latest existing metric (not by today's date)
+          // This ensures fundamentals land on the same doc that has technicals
+          const updated = await StockMetric.findOneAndUpdate(
+            { symbol: stock.symbol },
             {
+              $set: {
+                ...fundamentals,
+                fundamentalsUpdatedAt: new Date(),
+              },
+            },
+            { sort: { date: -1 }, new: true }
+          );
+
+          if (!updated) {
+            // No metric exists yet — create one for today
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+            await StockMetric.create({
               symbol: stock.symbol,
               date: today,
-              ...overview,
+              ...fundamentals,
               fundamentalsUpdatedAt: new Date(),
-            },
-            { upsert: true }
-          );
+            });
+          }
+
+          success++;
           logger.debug(`Updated fundamentals for ${stock.symbol}`);
         }
 
-        // Rate limit: 5 calls per minute for free tier
-        await new Promise((resolve) => setTimeout(resolve, 12000));
+        // Rate limit: ~2 requests per second to avoid Yahoo throttling
+        await new Promise((resolve) => setTimeout(resolve, 500));
       } catch (error) {
         logger.error(`Failed to fetch fundamentals for ${stock.symbol}:`, error);
       }
     }
 
-    logger.info('Finished fetching fundamentals batch');
+    logger.info(`Finished fetching fundamentals: ${success}/${needsUpdate.length} updated`);
   }
 
   /** Get market status (Nifty + BankNifty) */

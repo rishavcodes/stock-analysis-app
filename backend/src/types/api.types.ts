@@ -38,6 +38,23 @@ export const CreateAlertSchema = z.object({
 
 export type CreateAlert = z.infer<typeof CreateAlertSchema>;
 
+// Manual fundamentals import
+export const ManualFundamentalsSchema = z.object({
+  pe: z.number().nullable().optional(),
+  roe: z.number().nullable().optional(),
+  roce: z.number().nullable().optional(),
+  debtToEquity: z.number().nullable().optional(),
+  revenueGrowthYoY: z.number().nullable().optional(),
+  profitGrowthYoY: z.number().nullable().optional(),
+  profitMargin: z.number().nullable().optional(),
+  marketCap: z.number().nullable().optional(),
+  bookValue: z.number().nullable().optional(),
+  dividendYield: z.number().nullable().optional(),
+  promoterHolding: z.number().nullable().optional(),
+});
+
+export type ManualFundamentals = z.infer<typeof ManualFundamentalsSchema>;
+
 // API response wrapper
 export interface ApiResponse<T> {
   success: boolean;

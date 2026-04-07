@@ -5,12 +5,15 @@ import { Stock } from '../models/Stock';
 import { Candle } from '../models/Candle';
 import { AnalysisLog } from '../models/AnalysisLog';
 import { AIAnalysisService } from '../services/ai-analysis.service';
-import { validateQuery } from '../middleware/validate';
-import { ScreenerQuerySchema } from '../types/api.types';
+import { SmartAPIService } from '../services/smartapi.service';
+import { validateQuery, validateBody } from '../middleware/validate';
+import { ScreenerQuerySchema, ManualFundamentalsSchema } from '../types/api.types';
 import { analysisLimiter } from '../middleware/rate-limiter';
+import { logger } from '../utils/logger';
 
 const router = Router();
 const aiService = new AIAnalysisService();
+const smartApi = new SmartAPIService();
 
 // GET /api/stocks/screener
 router.get('/screener', validateQuery(ScreenerQuerySchema), async (req: Request, res: Response, next: NextFunction) => {
@@ -85,28 +88,55 @@ router.get('/:symbol', async (req: Request, res: Response, next: NextFunction) =
   try {
     const symbol = (req.params.symbol as string).toUpperCase();
 
-    const [stock, latestMetric, candles, latestAnalysis] = await Promise.all([
-      Stock.findOne({ symbol }).lean(),
+    // Fetch stock first to get the Angel One token for candle query
+    const stock = await Stock.findOne({ symbol }).lean();
+    if (!stock) {
+      res.status(404).json({ success: false, error: `Stock ${symbol} not found` });
+      return;
+    }
+
+    const [latestMetric, candles, latestAnalysis] = await Promise.all([
       StockMetric.findOne({ symbol }).sort({ date: -1 }).lean(),
-      Candle.find({ stockToken: symbol, interval: 'ONE_DAY' })
+      Candle.find({ stockToken: stock.token, interval: 'ONE_DAY' })
         .sort({ timestamp: -1 })
         .limit(365)
         .lean(),
       AnalysisLog.findOne({ symbol }).sort({ analysisDate: -1 }).lean(),
     ]);
 
-    if (!stock) {
-      res.status(404).json({ success: false, error: `Stock ${symbol} not found` });
-      return;
+    // candles are sorted timestamp DESC: [0]=latest, [1]=previous day
+    // prevClose = previous trading day's close (for change calculation)
+    const prevClose = candles.length > 1 ? candles[1].close : null;
+    let lastPrice: number | null = null;
+
+    try {
+      await smartApi.initialize();
+      const ltpMap = await smartApi.getLTP([stock.token], stock.exchange);
+      lastPrice = ltpMap.get(stock.token) || null;
+    } catch (error) {
+      logger.warn(`Could not fetch live LTP for ${symbol}, using last candle close`);
     }
+
+    // Fall back to last candle close if live LTP unavailable
+    if (lastPrice == null && candles.length > 0) {
+      lastPrice = candles[0].close;
+    }
+
+    const change = lastPrice != null && prevClose != null ? lastPrice - prevClose : null;
+    const changePercent = lastPrice != null && prevClose != null && prevClose > 0
+      ? ((lastPrice - prevClose) / prevClose) * 100
+      : null;
 
     res.json({
       success: true,
       data: {
         stock,
         metrics: latestMetric,
-        candles: candles.reverse(),
+        candles: candles.reverse(), // oldest first for charts
         analysis: latestAnalysis,
+        lastPrice,
+        change,
+        changePercent,
       },
     });
   } catch (error) {
@@ -121,6 +151,36 @@ router.get('/:symbol/analysis', analysisLimiter, async (req: Request, res: Respo
     const force = req.query.force === 'true';
     const analysis = await aiService.analyzeStock(symbol, force);
     res.json({ success: true, data: analysis });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/stocks/:symbol/fundamentals — Manual fundamentals import
+router.post('/:symbol/fundamentals', validateBody(ManualFundamentalsSchema), async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const symbol = (req.params.symbol as string).toUpperCase();
+    const stock = await Stock.findOne({ symbol }).lean();
+    if (!stock) {
+      res.status(404).json({ success: false, error: `Stock ${symbol} not found` });
+      return;
+    }
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const updated = await StockMetric.findOneAndUpdate(
+      { symbol, date: today },
+      {
+        $set: {
+          ...req.body,
+          fundamentalsUpdatedAt: new Date(),
+        },
+      },
+      { upsert: true, new: true }
+    );
+
+    res.json({ success: true, data: updated });
   } catch (error) {
     next(error);
   }

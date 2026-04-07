@@ -6,11 +6,10 @@ import { Candle } from '@/types';
 
 interface PriceChartProps {
   candles: Candle[];
-  sma20?: number[];
-  sma50?: number[];
+  lastPrice?: number | null;
 }
 
-export default function PriceChart({ candles }: PriceChartProps) {
+export default function PriceChart({ candles, lastPrice }: PriceChartProps) {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
 
@@ -48,6 +47,7 @@ export default function PriceChart({ candles }: PriceChartProps) {
       wickUpColor: '#22C55E',
     });
 
+    // Build candle data — append today's live candle if we have a live price
     const candleData = candles.map((c) => ({
       time: c.timestamp.split('T')[0] as string,
       open: c.open,
@@ -55,7 +55,47 @@ export default function PriceChart({ candles }: PriceChartProps) {
       low: c.low,
       close: c.close,
     }));
+
+    // Inject today's live price as a real-time candle update
+    if (lastPrice != null && candles.length > 0) {
+      const today = new Date().toISOString().split('T')[0];
+      const lastCandleDate = candleData[candleData.length - 1].time;
+
+      if (today > lastCandleDate) {
+        // Today has no candle yet — add a new candle for today using live price
+        const prevClose = candles[candles.length - 1].close;
+        candleData.push({
+          time: today,
+          open: prevClose,
+          high: Math.max(prevClose, lastPrice),
+          low: Math.min(prevClose, lastPrice),
+          close: lastPrice,
+        });
+      } else if (today === lastCandleDate) {
+        // Today's candle exists — update its close with live price
+        const todayCandle = candleData[candleData.length - 1];
+        todayCandle.close = lastPrice;
+        todayCandle.high = Math.max(todayCandle.high, lastPrice);
+        todayCandle.low = Math.min(todayCandle.low, lastPrice);
+      }
+    }
+
     candleSeries.setData(candleData as any);
+
+    // Add a horizontal price line at the live price
+    if (lastPrice != null) {
+      const prevClose = candles[candles.length - 1]?.close ?? lastPrice;
+      const lineColor = lastPrice >= prevClose ? '#22C55E' : '#EF4444';
+
+      candleSeries.createPriceLine({
+        price: lastPrice,
+        color: lineColor,
+        lineWidth: 1,
+        lineStyle: 2, // Dashed
+        axisLabelVisible: true,
+        title: 'LTP',
+      });
+    }
 
     // Volume series
     const volumeSeries = chart.addSeries(HistogramSeries, {
@@ -88,7 +128,7 @@ export default function PriceChart({ candles }: PriceChartProps) {
       window.removeEventListener('resize', handleResize);
       chart.remove();
     };
-  }, [candles]);
+  }, [candles, lastPrice]);
 
   return (
     <div className="rounded-lg border border-gray-800 bg-gray-900 p-4">
