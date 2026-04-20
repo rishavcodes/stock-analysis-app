@@ -16,6 +16,8 @@ export interface IStockMetric extends Document {
   bookValue: number | null;
   dividendYield: number | null;
   promoterHolding: number | null;
+  quarterlyEpsGrowth: number[];
+  earningsConsistencyScore: number | null;
 
   // Technicals (computed)
   sma20: number;
@@ -38,10 +40,27 @@ export interface IStockMetric extends Document {
   marketScore: number;
   finalScore: number;
 
+  // Risk (Phase 3)
+  volatility20d: number;
+  maxDrawdown90d: number;
+  atr14: number;
+  tradedValue20d: number;
+  riskScore: number;
+  adjustedFinalScore: number;
+
   // Signals
   isBreakout: boolean;
   breakoutType: 'PRICE' | 'VOLUME' | null;
   trendDirection: 'UP' | 'DOWN' | 'SIDEWAYS';
+
+  // Regime / weights (Phase 2)
+  marketRegime: 'BULLISH' | 'BEARISH' | 'SIDEWAYS' | null;
+  weightsUsed: {
+    market: number;
+    sector: number;
+    fundamental: number;
+    technical: number;
+  } | null;
 
   // Metadata
   fundamentalsUpdatedAt: Date | null;
@@ -64,6 +83,8 @@ const stockMetricSchema = new Schema<IStockMetric>(
     bookValue: { type: Number, default: null },
     dividendYield: { type: Number, default: null },
     promoterHolding: { type: Number, default: null },
+    quarterlyEpsGrowth: { type: [Number], default: [] },
+    earningsConsistencyScore: { type: Number, default: null },
 
     // Technicals
     sma20: { type: Number, default: 0 },
@@ -86,10 +107,33 @@ const stockMetricSchema = new Schema<IStockMetric>(
     marketScore: { type: Number, default: 0, min: 0, max: 100 },
     finalScore: { type: Number, default: 0, min: 0, max: 100 },
 
+    // Risk
+    volatility20d: { type: Number, default: 0 },
+    maxDrawdown90d: { type: Number, default: 0 },
+    atr14: { type: Number, default: 0 },
+    tradedValue20d: { type: Number, default: 0 },
+    riskScore: { type: Number, default: 0, min: 0, max: 100 },
+    adjustedFinalScore: { type: Number, default: 0, min: 0, max: 100 },
+
     // Signals
     isBreakout: { type: Boolean, default: false },
     breakoutType: { type: String, enum: ['PRICE', 'VOLUME', null], default: null },
     trendDirection: { type: String, enum: ['UP', 'DOWN', 'SIDEWAYS'], default: 'SIDEWAYS' },
+
+    // Regime / weights
+    marketRegime: { type: String, enum: ['BULLISH', 'BEARISH', 'SIDEWAYS', null], default: null },
+    weightsUsed: {
+      type: new Schema(
+        {
+          market: { type: Number, required: true },
+          sector: { type: Number, required: true },
+          fundamental: { type: Number, required: true },
+          technical: { type: Number, required: true },
+        },
+        { _id: false }
+      ),
+      default: null,
+    },
 
     fundamentalsUpdatedAt: { type: Date, default: null },
   },
@@ -98,5 +142,6 @@ const stockMetricSchema = new Schema<IStockMetric>(
 
 stockMetricSchema.index({ symbol: 1, date: -1 }, { unique: true });
 stockMetricSchema.index({ finalScore: -1 });
+stockMetricSchema.index({ adjustedFinalScore: -1 });
 
 export const StockMetric = mongoose.model<IStockMetric>('StockMetric', stockMetricSchema);

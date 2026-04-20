@@ -1,7 +1,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { PortfolioService } from '../services/portfolio.service';
 import { validateBody } from '../middleware/validate';
-import { AddHoldingSchema } from '../types/api.types';
+import { AddHoldingSchema, CanAddPositionSchema, PositionSizingSchema } from '../types/api.types';
 
 const router = Router();
 const portfolioService = new PortfolioService();
@@ -53,6 +53,41 @@ router.post('/:id/exit', async (req: Request, res: Response, next: NextFunction)
     const { exitPrice } = req.body;
     const holding = await portfolioService.exitHolding(req.params.id as string, exitPrice);
     res.json({ success: true, data: holding });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/portfolio/intelligence — sector exposure + portfolio risk score
+router.get('/intelligence', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const [sectorExposure, portfolioRiskScore] = await Promise.all([
+      portfolioService.getSectorExposure(),
+      portfolioService.getPortfolioRiskScore(),
+    ]);
+    res.json({ success: true, data: { sectorExposure, portfolioRiskScore } });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/portfolio/sizing — compute risk-based position size
+router.post('/sizing', validateBody(PositionSizingSchema), async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { capital, riskPct, entryPrice, stopLoss } = req.body;
+    const sizing = portfolioService.computePositionSize(capital, riskPct, entryPrice, stopLoss);
+    res.json({ success: true, data: sizing });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/portfolio/can-add — sector + correlation check
+router.post('/can-add', validateBody(CanAddPositionSchema), async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { symbol, capital } = req.body;
+    const result = await portfolioService.canAddPosition(symbol, capital);
+    res.json({ success: true, data: result });
   } catch (error) {
     next(error);
   }

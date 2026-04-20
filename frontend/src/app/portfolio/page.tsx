@@ -5,6 +5,7 @@ import { usePortfolioStore } from '@/stores/portfolio.store';
 import HoldingsTable from '@/components/portfolio/HoldingsTable';
 import PnLSummary from '@/components/portfolio/PnLSummary';
 import AddHoldingModal from '@/components/portfolio/AddHoldingModal';
+import PortfolioIntelligence from '@/components/portfolio/PortfolioIntelligence';
 import LoadingSpinner from '@/components/shared/LoadingSpinner';
 
 export default function PortfolioPage() {
@@ -32,6 +33,7 @@ export default function PortfolioPage() {
       ) : (
         <>
           {summary && <PnLSummary summary={summary} />}
+          <PortfolioIntelligence />
           <HoldingsTable holdings={holdings} />
         </>
       )}

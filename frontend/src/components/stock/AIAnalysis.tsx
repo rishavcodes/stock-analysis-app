@@ -1,10 +1,11 @@
 'use client';
 
-import { useState } from 'react';
-import { Analysis } from '@/types';
+import { useEffect, useState } from 'react';
+import { Analysis, DecisionTrace } from '@/types';
 import { useStockStore } from '@/stores/stock.store';
 import { getRecommendationColor, formatINR, formatDate } from '@/lib/format';
 import LoadingSpinner from '@/components/shared/LoadingSpinner';
+import api from '@/lib/api';
 
 interface AIAnalysisProps {
   analysis: Analysis | null;
@@ -15,13 +16,31 @@ export default function AIAnalysis({ analysis, symbol }: AIAnalysisProps) {
   const { triggerAnalysis } = useStockStore();
   const [loading, setLoading] = useState(false);
   const [currentAnalysis, setCurrentAnalysis] = useState<Analysis | null>(analysis);
+  const [trace, setTrace] = useState<DecisionTrace | null>(null);
 
   const handleAnalyze = async (force = false) => {
     setLoading(true);
+    setTrace(null);
     const result = await triggerAnalysis(symbol, force);
     if (result) setCurrentAnalysis(result);
     setLoading(false);
   };
+
+  useEffect(() => {
+    if (!currentAnalysis?._id) return;
+    let cancelled = false;
+    api
+      .get(`/stocks/analysis/${currentAnalysis._id}/trace`)
+      .then((res) => {
+        if (!cancelled) setTrace(res.data.data.decisionTrace ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setTrace(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentAnalysis?._id]);
 
   if (loading) {
     return (
@@ -131,6 +150,66 @@ export default function AIAnalysis({ analysis, symbol }: AIAnalysisProps) {
           </div>
         )}
       </div>
+
+      {/* Reasoning (5-step) */}
+      {currentAnalysis.reasoning && (
+        <details className="mt-4 rounded-md border border-gray-800 bg-gray-950/40 p-3">
+          <summary className="cursor-pointer text-xs font-medium text-gray-400 hover:text-gray-200">
+            Reasoning
+          </summary>
+          <dl className="mt-3 space-y-2 text-xs">
+            {(['market', 'sector', 'technical', 'fundamental', 'synthesis'] as const).map((key) =>
+              currentAnalysis.reasoning?.[key] ? (
+                <div key={key}>
+                  <dt className="mb-0.5 font-medium uppercase tracking-wide text-gray-500">{key}</dt>
+                  <dd className="whitespace-pre-line leading-relaxed text-gray-300">
+                    {currentAnalysis.reasoning[key]}
+                  </dd>
+                </div>
+              ) : null
+            )}
+          </dl>
+        </details>
+      )}
+
+      {/* Decision trace */}
+      {trace && (
+        <details className="mt-3 rounded-md border border-gray-800 bg-gray-950/40 p-3">
+          <summary className="cursor-pointer text-xs font-medium text-gray-400 hover:text-gray-200">
+            Decision trace
+          </summary>
+          <div className="mt-3 space-y-2 text-xs text-gray-300">
+            <div>
+              <span className="text-gray-500">Regime:</span>{' '}
+              <span className="font-medium">{trace.regimeDetected ?? 'n/a'}</span>
+              {trace.weightsUsed && (
+                <span className="ml-3 text-gray-500">
+                  Weights: M{(trace.weightsUsed.market * 100).toFixed(0)}% /
+                  S{(trace.weightsUsed.sector * 100).toFixed(0)}% /
+                  F{(trace.weightsUsed.fundamental * 100).toFixed(0)}% /
+                  T{(trace.weightsUsed.technical * 100).toFixed(0)}%
+                </span>
+              )}
+            </div>
+            <div>
+              <span className="text-gray-500">Sub-scores:</span>{' '}
+              market {trace.subScoresAtTime.market} · sector {trace.subScoresAtTime.sector} ·
+              fundamental {trace.subScoresAtTime.fundamental} · technical {trace.subScoresAtTime.technical}
+              {trace.subScoresAtTime.risk != null && <> · risk {trace.subScoresAtTime.risk}</>}
+            </div>
+            {trace.riskFactors && (
+              <div className="text-gray-400">
+                Risk: vol {(trace.riskFactors.volatility20d * 100).toFixed(2)}% ·
+                maxDD {(trace.riskFactors.maxDrawdown90d * 100).toFixed(1)}% ·
+                ATR {trace.riskFactors.atr14.toFixed(2)}
+              </div>
+            )}
+            <div className="text-gray-400">
+              Nifty: {trace.niftyTrend} · {trace.sectorStrength}
+            </div>
+          </div>
+        </details>
+      )}
 
       <div className="mt-3 text-xs text-gray-600">
         Analyzed: {formatDate(currentAnalysis.analysisDate)}

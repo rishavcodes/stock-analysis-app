@@ -46,3 +46,42 @@ export function todayIST(): string {
   const ist = getISTDate();
   return ist.toISOString().split('T')[0];
 }
+
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+
+/**
+ * True if `date` (interpreted in IST) is a Monday-through-Friday trading day.
+ * Does NOT account for NSE holidays — those pass through and simply yield no
+ * candle from the broker, which is fine (we just skip storing nothing).
+ */
+export function isTradingDayIST(date: Date): boolean {
+  // Shift the UTC instant forward by 5.5h, then read UTC components — this
+  // gives the calendar date/weekday as seen in IST without depending on the
+  // server's local timezone.
+  const istShifted = new Date(date.getTime() + IST_OFFSET_MS);
+  const day = istShifted.getUTCDay();
+  return day !== 0 && day !== 6;
+}
+
+/**
+ * Most recent trading day at 00:00 IST expressed as a UTC Date.
+ * If today (IST) is a weekday, returns today 00:00 IST. If Sat, returns Fri.
+ * If Sun, returns Fri. Pre-market Monday still returns today (the cron
+ * runs at 16:00 IST after close, so by scheduled run time today is valid).
+ */
+export function mostRecentTradingDayIST(now: Date = new Date()): Date {
+  const istShifted = new Date(now.getTime() + IST_OFFSET_MS);
+  while (istShifted.getUTCDay() === 0 || istShifted.getUTCDay() === 6) {
+    istShifted.setUTCDate(istShifted.getUTCDate() - 1);
+  }
+  // 00:00 IST of that date, expressed as the equivalent UTC instant.
+  const istMidnightUtc = Date.UTC(
+    istShifted.getUTCFullYear(),
+    istShifted.getUTCMonth(),
+    istShifted.getUTCDate(),
+    0,
+    0,
+    0
+  );
+  return new Date(istMidnightUtc - IST_OFFSET_MS);
+}

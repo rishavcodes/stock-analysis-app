@@ -1,7 +1,16 @@
 import winston from 'winston';
 import { env } from '../config/env';
 
-export const logger = winston.createLogger({
+export interface DecisionLogPayload {
+  symbol: string;
+  recommendation: 'BUY' | 'WATCH' | 'AVOID';
+  regime: 'BULLISH' | 'BEARISH' | 'SIDEWAYS' | null;
+  weightsUsed: { market: number; sector: number; fundamental: number; technical: number } | null;
+  scores: { market: number; sector: number; fundamental: number; technical: number; risk?: number; final: number };
+  confidence: number;
+}
+
+const baseLogger = winston.createLogger({
   level: env.NODE_ENV === 'production' ? 'info' : 'debug',
   format: winston.format.combine(
     winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
@@ -22,4 +31,11 @@ export const logger = winston.createLogger({
     new winston.transports.File({ filename: 'logs/error.log', level: 'error' }),
     new winston.transports.File({ filename: 'logs/combined.log' }),
   ],
+});
+
+/** Extended logger with a structured `decision` event for AI recommendation traceability. */
+export const logger = Object.assign(baseLogger, {
+  decision(payload: DecisionLogPayload): void {
+    baseLogger.info('decision_made', { event: 'decision_made', ...payload });
+  },
 });

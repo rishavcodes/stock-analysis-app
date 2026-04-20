@@ -62,8 +62,10 @@ export default function FilterBar({ onFilter }: FilterBarProps) {
           className="rounded-md border border-gray-700 bg-gray-800 px-3 py-1.5 text-sm text-gray-200"
         >
           <option value="finalScore">Final Score</option>
+          <option value="adjustedFinalScore">Risk-adjusted Score</option>
           <option value="technicalScore">Technical Score</option>
           <option value="fundamentalScore">Fundamental Score</option>
+          <option value="riskScore">Risk Score (low first)</option>
           <option value="volume">Volume</option>
         </select>
       </div>

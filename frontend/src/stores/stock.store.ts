@@ -4,6 +4,22 @@ import { create } from 'zustand';
 import api from '@/lib/api';
 import { StockDetail, StockMetric, Analysis } from '@/types';
 
+export interface AccuracyBreakdown {
+  key: string;
+  total: number;
+  win: number;
+  loss: number;
+  neutral: number;
+  unevaluable: number;
+  winRate: number;
+  avgReturnPct: number;
+}
+
+export interface AccuracyResponse {
+  overall: Omit<AccuracyBreakdown, 'key'>;
+  breakdowns: AccuracyBreakdown[];
+}
+
 interface StockStore {
   stockDetail: StockDetail | null;
   screenerResults: StockMetric[];
@@ -13,6 +29,7 @@ interface StockStore {
   fetchStockDetail: (symbol: string) => Promise<void>;
   fetchScreener: (params: Record<string, any>) => Promise<void>;
   triggerAnalysis: (symbol: string, force?: boolean) => Promise<Analysis | null>;
+  fetchAccuracy: (params?: { groupBy?: 'recommendation' | 'sector' | 'month' | 'timeHorizon'; from?: string; to?: string }) => Promise<AccuracyResponse | null>;
 }
 
 export const useStockStore = create<StockStore>((set) => ({
@@ -50,8 +67,19 @@ export const useStockStore = create<StockStore>((set) => ({
     try {
       const { data } = await api.get(`/stocks/${symbol}/analysis`, {
         params: { force: force.toString() },
+        timeout: 120000,
       });
       return data.data;
+    } catch (error: any) {
+      set({ error: error.message });
+      return null;
+    }
+  },
+
+  fetchAccuracy: async (params = {}) => {
+    try {
+      const { data } = await api.get('/analytics/accuracy', { params });
+      return data.data as AccuracyResponse;
     } catch (error: any) {
       set({ error: error.message });
       return null;

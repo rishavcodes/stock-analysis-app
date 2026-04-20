@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "nodemon",
     "build": "tsc",
-    "start": "node dist/app.js"
+    "start": "node dist/app.js",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.80.0",
@@ -21,6 +23,7 @@
     "p-queue": "^6.6.2",
     "smartapi-javascript": "^1.0.27",
     "winston": "^3.17.0",
+    "ws": "^8.20.0",
     "zod": "^3.24.0"
   },
   "devDependencies": {
@@ -28,8 +31,11 @@
     "@types/express": "^5.0.0",
     "@types/node": "^22.10.0",
     "@types/node-cron": "^3.0.11",
-    "nodemon": "^3.1.0",
+    "@types/ws": "^8.18.1",
+    "@vitest/ui": "^2.1.9",
+    "nodemon": "^3.1.14",
     "ts-node": "^10.9.0",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.9"
   }
 }

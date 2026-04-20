@@ -5,6 +5,7 @@ import { fetchCandlesJob } from './fetch-candles.job';
 import { computeMetricsJob } from './compute-metrics.job';
 import { fetchFundamentalsJob } from './fetch-fundamentals.job';
 import { checkAlertsJob } from './check-alerts.job';
+import { evaluatePredictionsJob } from './evaluate-predictions.job';
 
 export function initScheduler(): void {
   // Fetch daily candles at 4:00 PM IST (10:30 UTC)
@@ -30,6 +31,12 @@ export function initScheduler(): void {
     if (isMarketOpen()) {
       await checkAlertsJob();
     }
+  });
+
+  // Evaluate past predictions at 6:00 PM IST (12:30 UTC) weekdays
+  cron.schedule('30 12 * * 1-5', async () => {
+    logger.info('Running scheduled job: evaluate predictions');
+    await evaluatePredictionsJob();
   });
 
   logger.info('Cron scheduler initialized');

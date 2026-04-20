@@ -1,6 +1,18 @@
-import { SCORE_WEIGHTS } from '../config/constants';
+import { LIQUIDITY_THRESHOLDS, MarketRegime, RISK_PENALTY, SCORE_WEIGHTS, WEIGHT_CONFIG } from '../config/constants';
 import { Indicators } from '../types/analysis.types';
 import { IStockMetric } from '../models/StockMetric';
+
+export interface WeightsUsed {
+  market: number;
+  sector: number;
+  fundamental: number;
+  technical: number;
+}
+
+export interface FinalScoreResult {
+  finalScore: number;
+  weightsUsed: WeightsUsed;
+}
 
 export class ScoringService {
   /** Compute fundamental score (0-100) based on financial metrics */
@@ -58,9 +70,31 @@ export class ScoringService {
       else score += 2;
     }
 
+    // Earnings consistency (6th factor, Phase 3B).
+    // Requires >= 2 growth data points; otherwise skip so we don't dilute with noise.
+    const qog = metric.quarterlyEpsGrowth;
+    if (Array.isArray(qog) && qog.length >= 2) {
+      factorCount++;
+      const consistency100 = this.computeEarningsConsistency(qog); // 0-100
+      score += (consistency100 / 100) * 20;
+    }
+
     // Normalize to 0-100
     if (factorCount === 0) return 50; // No data, neutral score
     return Math.round((score / (factorCount * 20)) * 100);
+  }
+
+  /**
+   * Earnings consistency (0-100). Rewards positive mean growth, penalizes volatility.
+   * Input: array of growth % numbers (e.g. [15, 18, 12, 20]).
+   */
+  computeEarningsConsistency(growthPcts: number[]): number {
+    if (growthPcts.length === 0) return 50;
+    const mean = growthPcts.reduce((s, v) => s + v, 0) / growthPcts.length;
+    const variance = growthPcts.reduce((s, v) => s + (v - mean) ** 2, 0) / growthPcts.length;
+    const stdDev = Math.sqrt(variance);
+    // score = 50 + mean*2 - stdDev*1.5, clamped.
+    return Math.max(0, Math.min(100, Math.round(50 + mean * 2 - stdDev * 1.5)));
   }
 
   /** Compute technical score (0-100) based on indicators */
@@ -199,18 +233,76 @@ export class ScoringService {
     return Math.min(100, Math.round(score));
   }
 
-  /** Compute final weighted score */
+  /**
+   * Compute a 0-100 risk score. Higher = riskier.
+   * Four linear-scaled components, each 0-25:
+   *   volatility (daily stdev): 0% -> 0, 3%+ -> 25
+   *   maxDrawdown (90d):        0% -> 0, 30%+ -> 25
+   *   ATR-as-%-of-price:        0% -> 0, 5%+ -> 25
+   *   illiquidity:              >= 5Cr traded value -> 0, <= 50L -> 25 (log interp)
+   */
+  computeRiskScore(params: {
+    volatility: number;       // decimal, e.g. 0.018
+    maxDrawdown: number;      // decimal, e.g. 0.25
+    atr14: number;            // price units
+    price: number;
+    tradedValue: number;      // INR
+  }): number {
+    const volPts = Math.min(25, (params.volatility / 0.03) * 25);
+    const ddPts = Math.min(25, (params.maxDrawdown / 0.30) * 25);
+    const atrPct = params.price > 0 ? params.atr14 / params.price : 0;
+    const atrPts = Math.min(25, (atrPct / 0.05) * 25);
+
+    // Liquidity: log-interp between anchors. tv >= HIGH -> 0, <= LOW -> 25.
+    let liqPts = 0;
+    const { HIGH_LIQUIDITY_INR, LOW_LIQUIDITY_INR } = LIQUIDITY_THRESHOLDS;
+    if (params.tradedValue <= 0 || params.tradedValue <= LOW_LIQUIDITY_INR) {
+      liqPts = 25;
+    } else if (params.tradedValue >= HIGH_LIQUIDITY_INR) {
+      liqPts = 0;
+    } else {
+      const lnHigh = Math.log(HIGH_LIQUIDITY_INR);
+      const lnLow = Math.log(LOW_LIQUIDITY_INR);
+      const lnTv = Math.log(params.tradedValue);
+      // 1.0 at lnLow, 0.0 at lnHigh
+      const frac = (lnHigh - lnTv) / (lnHigh - lnLow);
+      liqPts = Math.max(0, Math.min(25, frac * 25));
+    }
+
+    return Math.round(Math.min(100, Math.max(0, volPts + ddPts + atrPts + liqPts)));
+  }
+
+  /** Subtract RISK_PENALTY * riskScore from finalScore, clamp at 0. */
+  computeAdjustedFinalScore(finalScore: number, riskScore: number): number {
+    return Math.max(0, Math.round(finalScore - riskScore * RISK_PENALTY));
+  }
+
+  /**
+   * Compute the final weighted score. Weights adapt to the provided market regime:
+   * BULLISH tilts toward technicals, BEARISH toward fundamentals, SIDEWAYS toward sector.
+   * If regime is undefined, falls back to the static default weights.
+   */
   computeFinalScore(
     marketScore: number,
     sectorScore: number,
     fundamentalScore: number,
-    technicalScore: number
-  ): number {
-    return Math.round(
-      marketScore * SCORE_WEIGHTS.MARKET +
-      sectorScore * SCORE_WEIGHTS.SECTOR +
-      fundamentalScore * SCORE_WEIGHTS.FUNDAMENTAL +
-      technicalScore * SCORE_WEIGHTS.TECHNICAL
+    technicalScore: number,
+    regime?: MarketRegime
+  ): FinalScoreResult {
+    const weightsUsed: WeightsUsed = regime
+      ? { ...WEIGHT_CONFIG[regime] }
+      : {
+          market: SCORE_WEIGHTS.MARKET,
+          sector: SCORE_WEIGHTS.SECTOR,
+          fundamental: SCORE_WEIGHTS.FUNDAMENTAL,
+          technical: SCORE_WEIGHTS.TECHNICAL,
+        };
+    const finalScore = Math.round(
+      marketScore * weightsUsed.market +
+        sectorScore * weightsUsed.sector +
+        fundamentalScore * weightsUsed.fundamental +
+        technicalScore * weightsUsed.technical
     );
+    return { finalScore, weightsUsed };
   }
 }

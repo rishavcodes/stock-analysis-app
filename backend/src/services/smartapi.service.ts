@@ -53,6 +53,21 @@ export class SmartAPIService {
     }
   }
 
+  /** Public wrapper for consumers (e.g. MarketStreamService) that need to bootstrap a session. */
+  async ensureSessionReady(): Promise<void> {
+    await this.ensureSession();
+  }
+
+  /** JWT token for Angel REST/WebSocket auth. Call ensureSessionReady() first. */
+  getJwtToken(): string | null {
+    return this.sessionToken;
+  }
+
+  /** Feed token for Angel WebSocket auth. Call ensureSessionReady() first. */
+  getFeedToken(): string | null {
+    return this.feedToken;
+  }
+
   /** Fetch historical candle data */
   async getCandles(
     symbolToken: string,

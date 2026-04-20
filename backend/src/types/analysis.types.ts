@@ -1,5 +1,15 @@
 import { z } from 'zod';
 
+export const ReasoningSchema = z.object({
+  market: z.string().optional(),
+  sector: z.string().optional(),
+  technical: z.string().optional(),
+  fundamental: z.string().optional(),
+  synthesis: z.string().optional(),
+});
+
+export type Reasoning = z.infer<typeof ReasoningSchema>;
+
 // Claude AI analysis output schema
 export const AnalysisOutputSchema = z.object({
   recommendation: z.enum(['BUY', 'AVOID', 'WATCH']),
@@ -11,6 +21,7 @@ export const AnalysisOutputSchema = z.object({
   targetPrice: z.number().nullable(),
   stopLoss: z.number().nullable(),
   timeHorizon: z.enum(['SHORT_TERM', 'MEDIUM_TERM', 'LONG_TERM']),
+  reasoning: ReasoningSchema.optional(),
 });
 
 export type AnalysisOutput = z.infer<typeof AnalysisOutputSchema>;
@@ -20,6 +31,12 @@ export interface StockAnalysisInput {
   name: string;
   sector: string;
   currentPrice: number;
+  /** Source of `currentPrice`: "LIVE_LTP" when fetched from broker in real-time, "LAST_CANDLE_CLOSE" when we fell back to the stored candle. */
+  priceSource: 'LIVE_LTP' | 'LAST_CANDLE_CLOSE';
+  /** Date (YYYY-MM-DD) of the most recent candle used for indicators. May be before today. */
+  indicatorsAsOf: string;
+  /** True when live LTP is materially different from the last stored candle close (> 2%). */
+  priceGapFromLastCandle: { pctMove: number; stale: boolean };
   priceData: {
     timestamp: string;
     open: number;
@@ -60,6 +77,7 @@ export interface StockAnalysisInput {
     niftyTrend: string;
     sectorStrength: string;
   };
+  decisionTrace?: DecisionTrace;
 }
 
 export interface Indicators {
@@ -80,3 +98,35 @@ export interface Indicators {
   breakoutType: 'PRICE' | 'VOLUME' | null;
   trendDirection: 'UP' | 'DOWN' | 'SIDEWAYS';
 }
+
+export const DecisionTraceSchema = z.object({
+  regimeDetected: z.enum(['BULLISH', 'BEARISH', 'SIDEWAYS']).nullable(),
+  weightsUsed: z
+    .object({
+      market: z.number(),
+      sector: z.number(),
+      fundamental: z.number(),
+      technical: z.number(),
+    })
+    .nullable(),
+  subScoresAtTime: z.object({
+    market: z.number(),
+    sector: z.number(),
+    fundamental: z.number(),
+    technical: z.number(),
+    risk: z.number().optional(),
+  }),
+  indicatorsAtTime: z.record(z.number()),
+  riskFactors: z
+    .object({
+      volatility20d: z.number(),
+      maxDrawdown90d: z.number(),
+      atr14: z.number(),
+      tradedValue20d: z.number().optional(),
+    })
+    .optional(),
+  niftyTrend: z.string(),
+  sectorStrength: z.string(),
+});
+
+export type DecisionTrace = z.infer<typeof DecisionTraceSchema>;

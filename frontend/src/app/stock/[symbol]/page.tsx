@@ -4,6 +4,7 @@ import { useEffect } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import { useStockStore } from '@/stores/stock.store';
+import { useLiveLtp } from '@/hooks/useLiveLtp';
 import PriceChart from '@/components/stock/PriceChart';
 import IndicatorPanel from '@/components/stock/IndicatorPanel';
 import FundamentalsTable from '@/components/stock/FundamentalsTable';
@@ -15,6 +16,7 @@ export default function StockDetailPage() {
   const params = useParams();
   const symbol = (params.symbol as string).toUpperCase();
   const { stockDetail, isLoading, fetchStockDetail } = useStockStore();
+  const live = useLiveLtp(symbol);
 
   useEffect(() => {
     fetchStockDetail(symbol);
@@ -28,7 +30,11 @@ export default function StockDetailPage() {
     );
   }
 
-  const { stock, metrics, candles, analysis, lastPrice, change, changePercent } = stockDetail;
+  const { stock, metrics, candles, analysis } = stockDetail;
+  // Live socket values take precedence over REST-sourced ones once a tick arrives.
+  const lastPrice = live.lastPrice ?? stockDetail.lastPrice;
+  const change = live.change ?? stockDetail.change;
+  const changePercent = live.changePercent ?? stockDetail.changePercent;
 
   return (
     <div className="space-y-6">
@@ -57,6 +63,14 @@ export default function StockDetailPage() {
                   {change >= 0 ? '+' : ''}{change.toFixed(2)} ({changePercent >= 0 ? '+' : ''}{changePercent.toFixed(2)}%)
                 </p>
               )}
+              <p className="mt-1 flex items-center justify-end gap-1 text-[10px] uppercase tracking-wide text-gray-500">
+                <span
+                  className={`inline-block h-1.5 w-1.5 rounded-full ${
+                    live.connected ? 'bg-green-500 animate-pulse' : 'bg-gray-600'
+                  }`}
+                />
+                {live.connected ? `live · ${live.tickCount} ticks` : 'static'}
+              </p>
             </div>
           )}
           {metrics && <ScoreGauge score={metrics.finalScore} />}

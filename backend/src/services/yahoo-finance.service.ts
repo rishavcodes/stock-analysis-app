@@ -1,6 +1,13 @@
 import axios from 'axios';
 import { logger } from '../utils/logger';
 
+export interface QuarterlyEarning {
+  quarter: string;        // e.g. "2024Q3"
+  epsActual: number | null;
+  epsEstimate: number | null;
+  surprisePct: number | null;
+}
+
 interface CompanyFundamentals {
   pe: number | null;
   forwardPe: number | null;
@@ -14,6 +21,8 @@ interface CompanyFundamentals {
   bookValue: number | null;
   dividendYield: number | null;
   promoterHolding: number | null;
+  quarterlyEarnings: QuarterlyEarning[];
+  quarterlyEpsGrowth: number[];  // last 4 YoY EPS growth % (oldest first)
 }
 
 export class YahooFinanceService {
@@ -69,7 +78,7 @@ export class YahooFinanceService {
         `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${yahooSymbol}`,
         {
           params: {
-            modules: 'defaultKeyStatistics,financialData,summaryDetail',
+            modules: 'defaultKeyStatistics,financialData,summaryDetail,earningsHistory,earningsTrend',
             crumb: this.crumb,
           },
           headers: {
@@ -94,6 +103,9 @@ export class YahooFinanceService {
       const rawDebtToEquity = this.extractRaw(fd.debtToEquity);
       const debtToEquity = rawDebtToEquity != null ? rawDebtToEquity / 100 : null;
 
+      const quarterlyEarnings = this.parseQuarterlyEarnings(result.earningsHistory);
+      const quarterlyEpsGrowth = this.computeQuarterlyEpsGrowth(quarterlyEarnings);
+
       const fundamentals: CompanyFundamentals = {
         pe: this.extractRaw(sd.trailingPE),
         forwardPe: this.extractRaw(sd.forwardPE),
@@ -107,9 +119,11 @@ export class YahooFinanceService {
         bookValue: this.extractRaw(ks.bookValue),
         dividendYield: this.extractRaw(sd.dividendYield),
         promoterHolding: this.extractRaw(ks.heldPercentInsiders),
+        quarterlyEarnings,
+        quarterlyEpsGrowth,
       };
 
-      logger.info(`Yahoo Finance: fetched fundamentals for ${symbol} (PE: ${fundamentals.pe}, MarketCap: ${fundamentals.marketCap})`);
+      logger.info(`Yahoo Finance: fetched fundamentals for ${symbol} (PE: ${fundamentals.pe}, MarketCap: ${fundamentals.marketCap}, Q growth: [${quarterlyEpsGrowth.map((v) => v.toFixed(1)).join(',')}])`);
       return fundamentals;
     } catch (error: any) {
       if (error.response?.status === 401) {
@@ -123,5 +137,47 @@ export class YahooFinanceService {
       }
       return null;
     }
+  }
+
+  /** Parse Yahoo's earningsHistory module into our normalized shape (oldest first). */
+  private parseQuarterlyEarnings(earningsHistory: any): QuarterlyEarning[] {
+    const rows: any[] = earningsHistory?.history ?? [];
+    if (!Array.isArray(rows) || rows.length === 0) return [];
+    return rows
+      .map((r) => ({
+        quarter: r.quarter?.fmt ?? '',
+        epsActual: this.extractRaw(r.epsActual),
+        epsEstimate: this.extractRaw(r.epsEstimate),
+        surprisePct: this.extractRaw(r.surprisePercent),
+      }))
+      .filter((r) => r.quarter !== '');
+  }
+
+  /**
+   * Compute last-4 YoY EPS growth % from the earnings history.
+   * Yahoo returns quarterly EPS but typically without prior-year data to do a true YoY
+   * in one call. As a pragmatic proxy we use sequential QoQ growth of the last 5 points
+   * (giving 4 growth values, newest last). Returns [] if fewer than 2 points.
+   * EPS sign flips return a capped sentinel (±100%) to avoid math blowup.
+   */
+  private computeQuarterlyEpsGrowth(earnings: QuarterlyEarning[]): number[] {
+    const eps = earnings
+      .map((e) => e.epsActual)
+      .filter((v): v is number => typeof v === 'number');
+    if (eps.length < 2) return [];
+    const slice = eps.slice(-5); // up to 5 quarters -> up to 4 growth points
+    const growth: number[] = [];
+    for (let i = 1; i < slice.length; i++) {
+      const prev = slice[i - 1];
+      const curr = slice[i];
+      if (prev === 0 || !Number.isFinite(prev)) continue;
+      if (prev < 0 && curr > 0) growth.push(100);
+      else if (prev > 0 && curr < 0) growth.push(-100);
+      else {
+        const g = ((curr - prev) / Math.abs(prev)) * 100;
+        growth.push(Math.max(-100, Math.min(100, g)));
+      }
+    }
+    return growth;
   }
 }

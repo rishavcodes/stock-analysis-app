@@ -6,7 +6,17 @@ export const ScreenerQuerySchema = z.object({
   sector: z.string().optional(),
   minScore: z.coerce.number().min(0).max(100).optional(),
   maxScore: z.coerce.number().min(0).max(100).optional(),
-  sortBy: z.enum(['finalScore', 'technicalScore', 'fundamentalScore', 'changePercent', 'volume']).default('finalScore'),
+  sortBy: z
+    .enum([
+      'finalScore',
+      'adjustedFinalScore',
+      'riskScore',
+      'technicalScore',
+      'fundamentalScore',
+      'changePercent',
+      'volume',
+    ])
+    .default('finalScore'),
   sortOrder: z.enum(['asc', 'desc']).default('desc'),
   breakoutOnly: z.coerce.boolean().optional(),
   page: z.coerce.number().min(1).default(1),
@@ -37,6 +47,41 @@ export const CreateAlertSchema = z.object({
 });
 
 export type CreateAlert = z.infer<typeof CreateAlertSchema>;
+
+// Portfolio sizing request
+export const PositionSizingSchema = z.object({
+  capital: z.number().positive(),
+  riskPct: z.number().positive().max(100),
+  entryPrice: z.number().positive(),
+  stopLoss: z.number().positive(),
+});
+export type PositionSizing = z.infer<typeof PositionSizingSchema>;
+
+// Portfolio can-add-position request
+export const CanAddPositionSchema = z.object({
+  symbol: z.string().min(1),
+  capital: z.number().positive(),
+});
+export type CanAddPositionBody = z.infer<typeof CanAddPositionSchema>;
+
+// Backtest run request
+export const BacktestRunSchema = z.object({
+  from: z.string().transform((s) => new Date(s)),
+  to: z.string().transform((s) => new Date(s)),
+  scoreThreshold: z.number().min(0).max(100).default(70),
+  exitRule: z.enum(['TECHNICAL', 'FIXED_HOLD', 'AI_RULES']).default('TECHNICAL'),
+  technicalExitThreshold: z.number().default(50),
+  maxHoldDays: z.number().positive().default(120),
+  stopLossAtrMultiple: z.number().positive().default(1.5),
+  targetAtrMultiple: z.number().positive().default(3.0),
+  holdDays: z.number().positive().default(20),
+  capital: z.number().positive().default(100_000),
+  positionSizePct: z.number().positive().max(100).default(10),
+  slippagePct: z.number().min(0).max(5).default(0.1),
+  maxConcurrentPositions: z.number().positive().default(10),
+  useHistoricalSectors: z.boolean().default(false),
+});
+export type BacktestRunBody = z.infer<typeof BacktestRunSchema>;
 
 // Manual fundamentals import
 export const ManualFundamentalsSchema = z.object({

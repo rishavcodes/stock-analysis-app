@@ -104,22 +104,43 @@ router.get('/:symbol', async (req: Request, res: Response, next: NextFunction) =
       AnalysisLog.findOne({ symbol }).sort({ analysisDate: -1 }).lean(),
     ]);
 
-    // candles are sorted timestamp DESC: [0]=latest, [1]=previous day
-    // prevClose = previous trading day's close (for change calculation)
-    const prevClose = candles.length > 1 ? candles[1].close : null;
     let lastPrice: number | null = null;
+    // Angel's "FULL" quote returns `close` = previous trading day's close.
+    // Use that as the authoritative prevClose, not candles[1], so the change
+    // is always relative to yesterday regardless of DB freshness.
+    let prevClose: number | null = null;
 
     try {
       await smartApi.initialize();
-      const ltpMap = await smartApi.getLTP([stock.token], stock.exchange);
-      lastPrice = ltpMap.get(stock.token) || null;
+      const fullQuote = await smartApi.getFullQuote([stock.token], stock.exchange);
+      const row = fullQuote[0];
+      if (row) {
+        if (typeof row.ltp === 'number' && row.ltp > 0) lastPrice = row.ltp;
+        if (typeof row.close === 'number' && row.close > 0) prevClose = row.close;
+      }
     } catch (error) {
-      logger.warn(`Could not fetch live LTP for ${symbol}, using last candle close`);
+      logger.warn(`Could not fetch FULL quote for ${symbol}, falling back to LTP + candles[1]`);
     }
 
-    // Fall back to last candle close if live LTP unavailable
+    // Fallback 1: try plain LTP if FULL didn't return a price.
+    if (lastPrice == null) {
+      try {
+        const ltpMap = await smartApi.getLTP([stock.token], stock.exchange);
+        lastPrice = ltpMap.get(stock.token) ?? null;
+      } catch {
+        // swallow; next fallback uses candles.
+      }
+    }
+
+    // Fallback 2: last candle close if live is unavailable.
     if (lastPrice == null && candles.length > 0) {
       lastPrice = candles[0].close;
+    }
+
+    // Fallback for prevClose: candles[1] (best-effort). Only used when broker quote
+    // failed; will be stale if the candle job is behind, so treat as last resort.
+    if (prevClose == null && candles.length > 1) {
+      prevClose = candles[1].close;
     }
 
     const change = lastPrice != null && prevClose != null ? lastPrice - prevClose : null;
@@ -135,6 +156,7 @@ router.get('/:symbol', async (req: Request, res: Response, next: NextFunction) =
         candles: candles.reverse(), // oldest first for charts
         analysis: latestAnalysis,
         lastPrice,
+        prevClose,
         change,
         changePercent,
       },
@@ -151,6 +173,38 @@ router.get('/:symbol/analysis', analysisLimiter, async (req: Request, res: Respo
     const force = req.query.force === 'true';
     const analysis = await aiService.analyzeStock(symbol, force);
     res.json({ success: true, data: analysis });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/stocks/analysis/:id/trace — decision trace for an AnalysisLog row
+router.get('/analysis/:id/trace', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const id = req.params.id as string;
+    if (!mongoose.isValidObjectId(id)) {
+      res.status(400).json({ success: false, error: 'Invalid analysis id' });
+      return;
+    }
+    const log = await AnalysisLog.findById(id).lean();
+    if (!log) {
+      res.status(404).json({ success: false, error: 'Analysis not found' });
+      return;
+    }
+    const input = (log.inputData ?? {}) as Record<string, unknown>;
+    res.json({
+      success: true,
+      data: {
+        _id: log._id,
+        symbol: log.symbol,
+        analysisDate: log.analysisDate,
+        recommendation: log.recommendation,
+        confidence: log.confidence,
+        reasoning: log.reasoning,
+        predictionOutcome: log.predictionOutcome,
+        decisionTrace: input.decisionTrace ?? null,
+      },
+    });
   } catch (error) {
     next(error);
   }

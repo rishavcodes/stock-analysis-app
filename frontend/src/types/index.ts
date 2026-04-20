@@ -92,6 +92,34 @@ export interface SectorRanking {
 }
 
 // Analysis
+export interface AnalysisReasoning {
+  market?: string;
+  sector?: string;
+  technical?: string;
+  fundamental?: string;
+  synthesis?: string;
+}
+
+export interface DecisionTrace {
+  regimeDetected: 'BULLISH' | 'BEARISH' | 'SIDEWAYS' | null;
+  weightsUsed: { market: number; sector: number; fundamental: number; technical: number } | null;
+  subScoresAtTime: { market: number; sector: number; fundamental: number; technical: number; risk?: number };
+  indicatorsAtTime: Record<string, number>;
+  riskFactors?: { volatility20d: number; maxDrawdown90d: number; atr14: number; tradedValue20d?: number };
+  niftyTrend: string;
+  sectorStrength: string;
+}
+
+export interface PredictionOutcome {
+  evaluated: boolean;
+  result?: 'WIN' | 'LOSS' | 'NEUTRAL' | 'UNEVALUABLE';
+  returnPct?: number;
+  exitPrice?: number;
+  exitReason?: 'TARGET_HIT' | 'STOP_LOSS_HIT' | 'TIME_EXPIRED' | 'NO_EXIT_RULES' | 'INSUFFICIENT_DATA';
+  sameCandleHit?: boolean;
+  evaluatedAt?: string;
+}
+
 export interface Analysis {
   _id: string;
   symbol: string;
@@ -105,6 +133,8 @@ export interface Analysis {
   targetPrice: number | null;
   stopLoss: number | null;
   timeHorizon: 'SHORT_TERM' | 'MEDIUM_TERM' | 'LONG_TERM';
+  reasoning?: AnalysisReasoning;
+  predictionOutcome?: PredictionOutcome;
 }
 
 // Portfolio holding
@@ -165,6 +195,7 @@ export interface StockDetail {
   candles: Candle[];
   analysis: Analysis | null;
   lastPrice: number | null;
+  prevClose: number | null;
   change: number | null;
   changePercent: number | null;
 }

@@ -147,6 +147,99 @@ export class IndicatorService {
     return { isBreakout: false, breakoutType: null };
   }
 
+  /**
+   * Annualized-style daily return volatility (std dev of simple returns) over `period`.
+   * Returns the stdDev as a decimal (e.g. 0.018 = 1.8% daily stdev).
+   */
+  calcVolatility(closes: number[], period: number = 20): number {
+    if (closes.length < period + 1) return 0;
+    const slice = closes.slice(-(period + 1));
+    const returns: number[] = [];
+    for (let i = 1; i < slice.length; i++) {
+      if (slice[i - 1] === 0) continue;
+      returns.push((slice[i] - slice[i - 1]) / slice[i - 1]);
+    }
+    if (returns.length === 0) return 0;
+    const mean = returns.reduce((s, v) => s + v, 0) / returns.length;
+    const variance = returns.reduce((s, v) => s + (v - mean) ** 2, 0) / returns.length;
+    return Math.sqrt(variance);
+  }
+
+  /** Max peak-to-trough drawdown over the last `lookback` closes. Returns a positive decimal (e.g. 0.22 = 22% drawdown). */
+  calcMaxDrawdown(closes: number[], lookback: number = 90): number {
+    if (closes.length === 0) return 0;
+    const slice = closes.slice(-lookback);
+    let peak = slice[0];
+    let maxDD = 0;
+    for (const price of slice) {
+      if (price > peak) peak = price;
+      if (peak > 0) {
+        const dd = (peak - price) / peak;
+        if (dd > maxDD) maxDD = dd;
+      }
+    }
+    return maxDD;
+  }
+
+  /** Average True Range (Wilder smoothing), `period` default 14. Returns ATR in price units. */
+  calcATR(highs: number[], lows: number[], closes: number[], period: number = 14): number {
+    const n = Math.min(highs.length, lows.length, closes.length);
+    if (n < period + 1) return 0;
+    const trs: number[] = [];
+    for (let i = 1; i < n; i++) {
+      const highLow = highs[i] - lows[i];
+      const highPrev = Math.abs(highs[i] - closes[i - 1]);
+      const lowPrev = Math.abs(lows[i] - closes[i - 1]);
+      trs.push(Math.max(highLow, highPrev, lowPrev));
+    }
+    if (trs.length < period) return 0;
+    // Wilder smoothing: first ATR = mean(TR over first `period` values), then recursive.
+    let atr = trs.slice(0, period).reduce((s, v) => s + v, 0) / period;
+    for (let i = period; i < trs.length; i++) {
+      atr = (atr * (period - 1) + trs[i]) / period;
+    }
+    return atr;
+  }
+
+  /** Traded value proxy for liquidity: avg volume * latest price (INR). */
+  calcTradedValue(avgVolume20: number, price: number): number {
+    return Math.max(0, avgVolume20 * price);
+  }
+
+  /**
+   * Pearson correlation of daily simple returns between two close-price series.
+   * Both series must be aligned (same length, same dates). Returns a value in [-1, 1].
+   * Returns null if too few aligned data points.
+   */
+  calcCorrelation(closesA: number[], closesB: number[]): number | null {
+    const n = Math.min(closesA.length, closesB.length);
+    if (n < 3) return null;
+    const a = closesA.slice(-n);
+    const b = closesB.slice(-n);
+    const retA: number[] = [];
+    const retB: number[] = [];
+    for (let i = 1; i < n; i++) {
+      if (a[i - 1] === 0 || b[i - 1] === 0) continue;
+      retA.push((a[i] - a[i - 1]) / a[i - 1]);
+      retB.push((b[i] - b[i - 1]) / b[i - 1]);
+    }
+    if (retA.length < 2) return null;
+    const meanA = retA.reduce((s, v) => s + v, 0) / retA.length;
+    const meanB = retB.reduce((s, v) => s + v, 0) / retB.length;
+    let num = 0;
+    let denA = 0;
+    let denB = 0;
+    for (let i = 0; i < retA.length; i++) {
+      const da = retA[i] - meanA;
+      const db = retB[i] - meanB;
+      num += da * db;
+      denA += da * da;
+      denB += db * db;
+    }
+    if (denA === 0 || denB === 0) return null;
+    return num / Math.sqrt(denA * denB);
+  }
+
   /** Classify trend based on MA alignment */
   classifyTrend(
     price: number,
@@ -156,6 +249,20 @@ export class IndicatorService {
   ): 'UP' | 'DOWN' | 'SIDEWAYS' {
     if (price > sma20 && sma20 > sma50 && sma50 > sma200) return 'UP';
     if (price < sma20 && sma20 < sma50 && sma50 < sma200) return 'DOWN';
+    return 'SIDEWAYS';
+  }
+
+  /**
+   * Classify market regime from an index close-price series (e.g. Nifty 50).
+   * BULLISH: price above 50DMA above 200DMA. BEARISH: opposite. SIDEWAYS: otherwise.
+   */
+  classifyMarketRegime(closes: number[]): 'BULLISH' | 'BEARISH' | 'SIDEWAYS' {
+    if (closes.length < 200) return 'SIDEWAYS';
+    const price = closes[closes.length - 1];
+    const sma50 = closes.slice(-50).reduce((s, v) => s + v, 0) / 50;
+    const sma200 = closes.slice(-200).reduce((s, v) => s + v, 0) / 200;
+    if (price > sma50 && sma50 > sma200) return 'BULLISH';
+    if (price < sma50 && sma50 < sma200) return 'BEARISH';
     return 'SIDEWAYS';
   }
 

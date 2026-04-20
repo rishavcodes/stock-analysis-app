@@ -91,7 +91,32 @@ declare module 'smartapi-javascript' {
   }
 
   class WebSocket {}
-  class WebSocketV2 {}
+
+  interface WebSocketV2Options {
+    clientcode: string;
+    jwttoken: string;
+    apikey: string;
+    feedtype: string;
+  }
+
+  interface WebSocketV2SubscribeRequest {
+    correlationID: string;
+    action: 0 | 1;
+    mode: 1 | 2 | 3 | 4;
+    exchangeType: number;
+    tokens: string[];
+  }
+
+  class WebSocketV2 {
+    constructor(options: WebSocketV2Options);
+    connect(): Promise<unknown>;
+    fetchData(request: WebSocketV2SubscribeRequest): void;
+    on(event: 'tick' | 'connect', cb: (data: unknown) => void): void;
+    close(): void;
+    reconnection?(type: 'simple' | 'exponential', delay: number, multiplier?: number): void;
+    customError?(): void;
+    _readyState: number;
+  }
 
   export { SmartAPI, WebSocket, WebSocketV2 };
 }

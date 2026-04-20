@@ -4,10 +4,11 @@ import { Stock, IStock } from '../models/Stock';
 import { Candle } from '../models/Candle';
 import { StockMetric } from '../models/StockMetric';
 import { SectorData } from '../models/SectorData';
-import { INDEX_TOKENS, EXCHANGE, INTERVALS, ALPHA_VANTAGE } from '../config/constants';
+import { MarketState } from '../models/MarketState';
+import { INDEX_TOKENS, EXCHANGE, INTERVALS, ALPHA_VANTAGE, MarketRegime, REGIME_SMOOTHING_DAYS } from '../config/constants';
 import { SECTOR_MAP } from '../config/sector-map';
 import { MarketStatus, IndexStatus, SectorRanking, CandleData } from '../types/market.types';
-import { isMarketOpen, formatSmartAPIDate, daysAgo } from '../utils/market-hours';
+import { isMarketOpen, formatSmartAPIDate, daysAgo, isTradingDayIST, mostRecentTradingDayIST } from '../utils/market-hours';
 import { IndicatorService } from './indicator.service';
 import { ScoringService } from './scoring.service';
 import { logger } from '../utils/logger';
@@ -75,9 +76,12 @@ export class MarketDataService {
     await this.ensureInit();
 
     const fromDate = formatSmartAPIDate(daysAgo(days));
-    const toDate = formatSmartAPIDate(new Date());
+    // Cap toDate at the most recent trading day's close, not "now". Prevents
+    // Angel from returning a partial intraday bar stamped as "today" when the
+    // cron (or a manual trigger) fires mid-session or on a weekend/holiday.
+    const toDate = formatSmartAPIDate(mostRecentTradingDayIST());
 
-    const candles = await this.smartApi.getCandles(
+    const raw = await this.smartApi.getCandles(
       stockToken,
       EXCHANGE.NSE,
       INTERVALS.ONE_DAY,
@@ -85,7 +89,14 @@ export class MarketDataService {
       toDate
     );
 
-    // Store in MongoDB
+    // Defensive: NSE is closed on Sat/Sun, so any weekend-stamped candle is
+    // garbage (e.g. a misrouted intraday snapshot). Drop before upsert.
+    const candles = raw.filter((c) => isTradingDayIST(c.timestamp));
+    const dropped = raw.length - candles.length;
+    if (dropped > 0) {
+      logger.warn(`Dropped ${dropped} non-trading-day candle(s) for token ${stockToken}`);
+    }
+
     if (candles.length > 0) {
       const ops = candles.map((c) => ({
         updateOne: {
@@ -102,23 +113,24 @@ export class MarketDataService {
 
   /** Fetch daily candles for all active stocks */
   async fetchAllDailyCandles(): Promise<void> {
-    // Skip stocks that already have recent candle data (resume support)
-    const yesterday = new Date();
-    yesterday.setDate(yesterday.getDate() - 2);
+    // Resume support: skip a stock only if it already has a candle for the most
+    // recent trading day. Using "any candle in last 2 days" was buggy: a single
+    // misstamped candle (e.g. a weekend/intraday row) could stick and prevent
+    // backfill of the real mid-range days forever.
+    const mostRecent = mostRecentTradingDayIST();
 
     const stocks = await Stock.find({ isActive: true, isIndex: false }).lean();
     let done = 0;
     let skipped = 0;
 
-    logger.info(`Fetching daily candles for ${stocks.length} stocks...`);
+    logger.info(`Fetching daily candles for ${stocks.length} stocks (target trading day: ${mostRecent.toISOString().slice(0, 10)})...`);
 
     for (const stock of stocks) {
       try {
-        // Check if we already have recent data for this stock
         const existing = await Candle.findOne({
           stockToken: stock.token,
           interval: 'ONE_DAY',
-          timestamp: { $gte: yesterday },
+          timestamp: { $gte: mostRecent },
         }).lean();
 
         if (existing) {
@@ -157,6 +169,11 @@ export class MarketDataService {
     const niftyCloses = niftyCandles.reverse().map((c) => c.close);
     const marketScore = this.scoringService.computeMarketScore(niftyCloses);
 
+    // Determine current market regime with N-day smoothing to avoid whipsaw.
+    const rawRegime = this.indicatorService.classifyMarketRegime(niftyCloses);
+    const regime = await this.resolveSmoothedRegime(rawRegime, today, niftyCloses[niftyCloses.length - 1] ?? 0);
+    logger.info(`Market regime: raw=${rawRegime} smoothed=${regime}`);
+
     for (const stock of stocks) {
       try {
         const candles = await Candle.find({
@@ -172,9 +189,24 @@ export class MarketDataService {
         const closes = candles.reverse().map((c) => c.close);
         const volumes = candles.map((c) => c.volume);
         const highs = candles.map((c) => c.high);
+        const lows = candles.map((c) => c.low);
 
         // Compute indicators
         const indicators = this.indicatorService.computeAll(closes, highs, volumes);
+
+        // Risk metrics
+        const currentPrice = closes[closes.length - 1] ?? 0;
+        const volatility20d = this.indicatorService.calcVolatility(closes, 20);
+        const maxDrawdown90d = this.indicatorService.calcMaxDrawdown(closes, 90);
+        const atr14 = this.indicatorService.calcATR(highs, lows, closes, 14);
+        const tradedValue20d = this.indicatorService.calcTradedValue(indicators.avgVolume20, currentPrice);
+        const riskScore = this.scoringService.computeRiskScore({
+          volatility: volatility20d,
+          maxDrawdown: maxDrawdown90d,
+          atr14,
+          price: currentPrice,
+          tradedValue: tradedValue20d,
+        });
 
         // Get existing fundamental data
         const existingMetric = await StockMetric.findOne({ symbol: stock.symbol })
@@ -193,12 +225,14 @@ export class MarketDataService {
           .lean();
         const sectorScore = sectorData?.sectorScore || 50;
 
-        const finalScore = this.scoringService.computeFinalScore(
+        const { finalScore, weightsUsed } = this.scoringService.computeFinalScore(
           marketScore,
           sectorScore,
           fundamentalScore,
-          technicalScore
+          technicalScore,
+          regime
         );
+        const adjustedFinalScore = this.scoringService.computeAdjustedFinalScore(finalScore, riskScore);
 
         await StockMetric.findOneAndUpdate(
           { symbol: stock.symbol, date: today },
@@ -220,12 +254,21 @@ export class MarketDataService {
             fundamentalsUpdatedAt: existingMetric?.fundamentalsUpdatedAt ?? null,
             // Technicals
             ...indicators,
+            // Risk
+            volatility20d,
+            maxDrawdown90d,
+            atr14,
+            tradedValue20d,
+            riskScore,
+            adjustedFinalScore,
             // Scores
             fundamentalScore,
             technicalScore,
             sectorScore,
             marketScore,
             finalScore,
+            marketRegime: regime,
+            weightsUsed,
           },
           { upsert: true }
         );
@@ -264,13 +307,23 @@ export class MarketDataService {
       try {
         const fundamentals = await this.yahooFinance.getCompanyFundamentals(stock.symbol);
         if (fundamentals) {
+          // quarterlyEarnings is captured in Yahoo response but not persisted on StockMetric
+          // (we only keep the derived growth % array and consistency score).
+          const { quarterlyEarnings, quarterlyEpsGrowth, ...rest } = fundamentals;
+          const earningsConsistencyScore =
+            quarterlyEpsGrowth.length >= 2
+              ? this.scoringService.computeEarningsConsistency(quarterlyEpsGrowth)
+              : null;
+
           // Update the latest existing metric (not by today's date)
           // This ensures fundamentals land on the same doc that has technicals
           const updated = await StockMetric.findOneAndUpdate(
             { symbol: stock.symbol },
             {
               $set: {
-                ...fundamentals,
+                ...rest,
+                quarterlyEpsGrowth,
+                earningsConsistencyScore,
                 fundamentalsUpdatedAt: new Date(),
               },
             },
@@ -284,7 +337,9 @@ export class MarketDataService {
             await StockMetric.create({
               symbol: stock.symbol,
               date: today,
-              ...fundamentals,
+              ...rest,
+              quarterlyEpsGrowth,
+              earningsConsistencyScore,
               fundamentalsUpdatedAt: new Date(),
             });
           }
@@ -338,9 +393,9 @@ export class MarketDataService {
       const lastSma50 = sma50[sma50.length - 1] || 0;
       const lastSma200 = sma200[sma200.length - 1] || 0;
 
-      let trend: 'BULLISH' | 'BEARISH' | 'SIDEWAYS' = 'SIDEWAYS';
-      if (currentPrice > lastSma50 && lastSma50 > lastSma200) trend = 'BULLISH';
-      else if (currentPrice < lastSma50 && lastSma50 < lastSma200) trend = 'BEARISH';
+      // Delegate to the pure classifier so live-status and scoring share the same rule.
+      const closesWithLive = [...closes.slice(0, -1), currentPrice];
+      const trend = this.indicatorService.classifyMarketRegime(closesWithLive);
 
       return {
         name,
@@ -457,5 +512,48 @@ export class MarketDataService {
     }
 
     logger.info('Finished computing sector data');
+  }
+
+  /**
+   * Smooth today's raw regime against recent MarketState history.
+   * Only flip the persisted regime when the last REGIME_SMOOTHING_DAYS raw readings agree;
+   * otherwise carry forward yesterday's regime. Persists today's MarketState row.
+   */
+  private async resolveSmoothedRegime(
+    rawRegime: MarketRegime,
+    today: Date,
+    niftyClose: number
+  ): Promise<MarketRegime> {
+    const history = await MarketState.find({ date: { $lt: today } })
+      .sort({ date: -1 })
+      .limit(REGIME_SMOOTHING_DAYS - 1)
+      .lean();
+
+    const previousRegime = history[0]?.regime;
+    const recentRaw = [rawRegime, ...history.map((h) => h.rawRegime)];
+
+    let resolvedRegime: MarketRegime;
+    let smoothed = false;
+    if (!previousRegime) {
+      resolvedRegime = rawRegime;
+    } else if (
+      recentRaw.length >= REGIME_SMOOTHING_DAYS &&
+      recentRaw.every((r) => r === rawRegime)
+    ) {
+      resolvedRegime = rawRegime;
+    } else if (rawRegime === previousRegime) {
+      resolvedRegime = rawRegime;
+    } else {
+      resolvedRegime = previousRegime;
+      smoothed = true;
+    }
+
+    await MarketState.findOneAndUpdate(
+      { date: today },
+      { date: today, rawRegime, regime: resolvedRegime, smoothed, niftyClose },
+      { upsert: true }
+    );
+
+    return resolvedRegime;
   }
 }
