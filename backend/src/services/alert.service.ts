@@ -1,7 +1,8 @@
-import { Alert, IAlert } from '../models/Alert';
-import { Portfolio } from '../models/Portfolio';
-import { StockMetric } from '../models/StockMetric';
-import { Stock } from '../models/Stock';
+import type { Alert } from '@prisma/client';
+import { alertRepo } from '../repositories/alert.repo';
+import { portfolioRepo } from '../repositories/portfolio.repo';
+import { stockMetricRepo } from '../repositories/stockmetric.repo';
+import { stockRepo } from '../repositories/stock.repo';
 import { SmartAPIService } from './smartapi.service';
 import { logger } from '../utils/logger';
 
@@ -14,12 +15,12 @@ export class AlertService {
 
   /** Evaluate all active alerts against current market data */
   async evaluateAlerts() {
-    const activeAlerts = await Alert.find({ isActive: true, isTriggered: false }).lean();
+    const activeAlerts = await alertRepo.findActiveUntriggered();
     if (activeAlerts.length === 0) return [];
 
     // Get unique symbols
     const symbols = [...new Set(activeAlerts.map((a) => a.symbol))];
-    const stocks = await Stock.find({ symbol: { $in: symbols } }).lean();
+    const stocks = await stockRepo.findManyBySymbols(symbols);
     const tokenMap = new Map(stocks.map((s) => [s.symbol, s.token]));
     const tokens = stocks.map((s) => s.token);
 
@@ -33,7 +34,7 @@ export class AlertService {
       return [];
     }
 
-    const triggeredAlerts: typeof activeAlerts = [];
+    const triggeredAlerts: Alert[] = [];
 
     for (const alert of activeAlerts) {
       const token = tokenMap.get(alert.symbol);
@@ -58,27 +59,21 @@ export class AlertService {
           triggered = currentPrice >= alert.threshold;
           break;
         case 'VOLUME_SPIKE': {
-          const metric = await StockMetric.findOne({ symbol: alert.symbol })
-            .sort({ date: -1 })
-            .lean();
+          const metric = await stockMetricRepo.findLatestBySymbol(alert.symbol);
           if (metric && metric.volumeRatio >= alert.threshold) {
             triggered = true;
           }
           break;
         }
         case 'BREAKOUT': {
-          const metric = await StockMetric.findOne({ symbol: alert.symbol })
-            .sort({ date: -1 })
-            .lean();
+          const metric = await stockMetricRepo.findLatestBySymbol(alert.symbol);
           if (metric?.isBreakout) {
             triggered = true;
           }
           break;
         }
         case 'SCORE_CHANGE': {
-          const metric = await StockMetric.findOne({ symbol: alert.symbol })
-            .sort({ date: -1 })
-            .lean();
+          const metric = await stockMetricRepo.findLatestBySymbol(alert.symbol);
           if (metric && metric.finalScore >= alert.threshold) {
             triggered = true;
           }
@@ -87,18 +82,17 @@ export class AlertService {
       }
 
       if (triggered) {
-        await Alert.findByIdAndUpdate(alert._id, {
-          isTriggered: true,
-          triggeredAt: new Date(),
-          message: `${alert.type} alert triggered for ${alert.symbol} at price ${currentPrice}`,
-        });
+        await alertRepo.markTriggered(
+          alert.id,
+          `${alert.type} alert triggered for ${alert.symbol} at price ${currentPrice}`
+        );
         triggeredAlerts.push(alert);
         logger.info(`Alert triggered: ${alert.type} for ${alert.symbol}`);
       }
     }
 
     // Also check portfolio stop-losses
-    const activeHoldings = await Portfolio.find({ status: 'ACTIVE', stopLoss: { $ne: null } }).lean();
+    const activeHoldings = await portfolioRepo.findActiveWithStopLoss();
     for (const holding of activeHoldings) {
       const token = tokenMap.get(holding.symbol);
       if (!token) continue;
@@ -107,7 +101,7 @@ export class AlertService {
 
       if (currentPrice <= holding.stopLoss) {
         // Auto-create triggered alert for stop-loss breach
-        const alert = await Alert.create({
+        const alert = await alertRepo.create({
           symbol: holding.symbol,
           type: 'STOP_LOSS',
           threshold: holding.stopLoss,
@@ -116,7 +110,7 @@ export class AlertService {
           triggeredAt: new Date(),
           message: `STOP-LOSS BREACH: ${holding.symbol} at ${currentPrice} (SL: ${holding.stopLoss})`,
         });
-        triggeredAlerts.push(alert as any);
+        triggeredAlerts.push(alert);
         logger.warn(`Stop-loss breached for ${holding.symbol}: ${currentPrice} <= ${holding.stopLoss}`);
       }
     }

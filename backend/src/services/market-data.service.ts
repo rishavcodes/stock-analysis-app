@@ -1,10 +1,10 @@
 import { SmartAPIService } from './smartapi.service';
 import { YahooFinanceService } from './yahoo-finance.service';
-import { Stock, IStock } from '../models/Stock';
-import { Candle } from '../models/Candle';
-import { StockMetric } from '../models/StockMetric';
-import { SectorData } from '../models/SectorData';
-import { MarketState } from '../models/MarketState';
+import { stockRepo } from '../repositories/stock.repo';
+import { candleRepo } from '../repositories/candle.repo';
+import { stockMetricRepo } from '../repositories/stockmetric.repo';
+import { sectorDataRepo } from '../repositories/sectordata.repo';
+import { marketStateRepo } from '../repositories/marketstate.repo';
 import { INDEX_TOKENS, EXCHANGE, INTERVALS, ALPHA_VANTAGE, MarketRegime, REGIME_SMOOTHING_DAYS } from '../config/constants';
 import { SECTOR_MAP } from '../config/sector-map';
 import { MarketStatus, IndexStatus, SectorRanking, CandleData } from '../types/market.types';
@@ -47,23 +47,17 @@ export class MarketDataService {
     for (const inst of nseStocks) {
       const symbol = inst.symbol.replace('-EQ', '');
       const sector = SECTOR_MAP[symbol] || 'Unknown';
-      await Stock.findOneAndUpdate(
-        { token: inst.token },
-        {
-          symbol,
-          token: inst.token,
-          name: inst.name || symbol,
-          exchange: 'NSE',
-          segment: 'EQ',
-          sector,
-          isin: inst.isin || '',
-          lotSize: parseInt(inst.lotsize) || 1,
-          isIndex: false,
-          isActive: true,
-          lastUpdated: new Date(),
-        },
-        { upsert: true }
-      );
+      await stockRepo.upsertByToken(inst.token, {
+        symbol,
+        name: inst.name || symbol,
+        exchange: 'NSE',
+        segment: 'EQ',
+        sector,
+        isin: inst.isin || '',
+        lotSize: parseInt(inst.lotsize) || 1,
+        isIndex: false,
+        isActive: true,
+      });
       count++;
     }
 
@@ -98,14 +92,18 @@ export class MarketDataService {
     }
 
     if (candles.length > 0) {
-      const ops = candles.map((c) => ({
-        updateOne: {
-          filter: { stockToken, interval: 'ONE_DAY', timestamp: c.timestamp },
-          update: { $set: { ...c, stockToken, interval: 'ONE_DAY' } },
-          upsert: true,
-        },
-      }));
-      await Candle.bulkWrite(ops);
+      await candleRepo.bulkUpsert(
+        candles.map((c) => ({
+          stockToken,
+          interval: 'ONE_DAY',
+          timestamp: c.timestamp,
+          open: c.open,
+          high: c.high,
+          low: c.low,
+          close: c.close,
+          volume: c.volume,
+        }))
+      );
     }
 
     return candles;
@@ -119,7 +117,7 @@ export class MarketDataService {
     // backfill of the real mid-range days forever.
     const mostRecent = mostRecentTradingDayIST();
 
-    const stocks = await Stock.find({ isActive: true, isIndex: false }).lean();
+    const stocks = await stockRepo.findActiveTradable();
     let done = 0;
     let skipped = 0;
 
@@ -127,13 +125,8 @@ export class MarketDataService {
 
     for (const stock of stocks) {
       try {
-        const existing = await Candle.findOne({
-          stockToken: stock.token,
-          interval: 'ONE_DAY',
-          timestamp: { $gte: mostRecent },
-        }).lean();
-
-        if (existing) {
+        const hasRecent = await candleRepo.existsOnOrAfter(stock.token, 'ONE_DAY', mostRecent);
+        if (hasRecent) {
           skipped++;
           continue;
         }
@@ -154,18 +147,12 @@ export class MarketDataService {
 
   /** Compute indicators and scores for all stocks */
   async computeAllMetrics(): Promise<void> {
-    const stocks = await Stock.find({ isActive: true, isIndex: false }).lean();
+    const stocks = await stockRepo.findActiveTradable();
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
     // Get market score once
-    const niftyCandles = await Candle.find({
-      stockToken: INDEX_TOKENS.NIFTY_50,
-      interval: 'ONE_DAY',
-    })
-      .sort({ timestamp: -1 })
-      .limit(200)
-      .lean();
+    const niftyCandles = await candleRepo.findRecent(INDEX_TOKENS.NIFTY_50, 'ONE_DAY', 200);
     const niftyCloses = niftyCandles.reverse().map((c) => c.close);
     const marketScore = this.scoringService.computeMarketScore(niftyCloses);
 
@@ -176,13 +163,7 @@ export class MarketDataService {
 
     for (const stock of stocks) {
       try {
-        const candles = await Candle.find({
-          stockToken: stock.token,
-          interval: 'ONE_DAY',
-        })
-          .sort({ timestamp: -1 })
-          .limit(200)
-          .lean();
+        const candles = await candleRepo.findRecent(stock.token, 'ONE_DAY', 200);
 
         if (candles.length < 50) continue; // Not enough data
 
@@ -191,8 +172,11 @@ export class MarketDataService {
         const highs = candles.map((c) => c.high);
         const lows = candles.map((c) => c.low);
 
-        // Compute indicators
-        const indicators = this.indicatorService.computeAll(closes, highs, volumes);
+        // Compute indicators. computeAll returns `bollingerMiddle` (used by the
+        // analysis prompt builder) but the StockMetric Prisma schema only has
+        // upper/lower — strip it before spreading into the upsert payload, or
+        // Prisma rejects the whole row with "Unknown argument".
+        const { bollingerMiddle: _bollingerMiddle, ...indicators } = this.indicatorService.computeAll(closes, highs, volumes);
 
         // Risk metrics
         const currentPrice = closes[closes.length - 1] ?? 0;
@@ -209,9 +193,7 @@ export class MarketDataService {
         });
 
         // Get existing fundamental data
-        const existingMetric = await StockMetric.findOne({ symbol: stock.symbol })
-          .sort({ date: -1 })
-          .lean();
+        const existingMetric = await stockMetricRepo.findLatestBySymbol(stock.symbol);
 
         // Compute scores
         const technicalScore = this.scoringService.computeTechnicalScore(closes, indicators);
@@ -220,9 +202,7 @@ export class MarketDataService {
           : 50; // Default if no fundamentals
 
         // Get sector score
-        const sectorData = await SectorData.findOne({ sector: stock.sector })
-          .sort({ date: -1 })
-          .lean();
+        const sectorData = await sectorDataRepo.findLatestBySector(stock.sector);
         const sectorScore = sectorData?.sectorScore || 50;
 
         const { finalScore, weightsUsed } = this.scoringService.computeFinalScore(
@@ -234,44 +214,41 @@ export class MarketDataService {
         );
         const adjustedFinalScore = this.scoringService.computeAdjustedFinalScore(finalScore, riskScore);
 
-        await StockMetric.findOneAndUpdate(
-          { symbol: stock.symbol, date: today },
-          {
-            symbol: stock.symbol,
-            date: today,
-            // Keep existing fundamentals
-            pe: existingMetric?.pe ?? null,
-            roe: existingMetric?.roe ?? null,
-            roce: existingMetric?.roce ?? null,
-            debtToEquity: existingMetric?.debtToEquity ?? null,
-            revenueGrowthYoY: existingMetric?.revenueGrowthYoY ?? null,
-            profitGrowthYoY: existingMetric?.profitGrowthYoY ?? null,
-            profitMargin: existingMetric?.profitMargin ?? null,
-            marketCap: existingMetric?.marketCap ?? null,
-            bookValue: existingMetric?.bookValue ?? null,
-            dividendYield: existingMetric?.dividendYield ?? null,
-            promoterHolding: existingMetric?.promoterHolding ?? null,
-            fundamentalsUpdatedAt: existingMetric?.fundamentalsUpdatedAt ?? null,
-            // Technicals
-            ...indicators,
-            // Risk
-            volatility20d,
-            maxDrawdown90d,
-            atr14,
-            tradedValue20d,
-            riskScore,
-            adjustedFinalScore,
-            // Scores
-            fundamentalScore,
-            technicalScore,
-            sectorScore,
-            marketScore,
-            finalScore,
-            marketRegime: regime,
-            weightsUsed,
-          },
-          { upsert: true }
-        );
+        await stockMetricRepo.upsertOnSymbolDate(stock.symbol, today, {
+          // Keep existing fundamentals
+          pe: existingMetric?.pe ?? null,
+          roe: existingMetric?.roe ?? null,
+          roce: existingMetric?.roce ?? null,
+          debtToEquity: existingMetric?.debtToEquity ?? null,
+          revenueGrowthYoY: existingMetric?.revenueGrowthYoY ?? null,
+          profitGrowthYoY: existingMetric?.profitGrowthYoY ?? null,
+          profitMargin: existingMetric?.profitMargin ?? null,
+          marketCap: existingMetric?.marketCap ?? null,
+          bookValue: existingMetric?.bookValue ?? null,
+          dividendYield: existingMetric?.dividendYield ?? null,
+          promoterHolding: existingMetric?.promoterHolding ?? null,
+          fundamentalsUpdatedAt: existingMetric?.fundamentalsUpdatedAt ?? null,
+          // Technicals
+          ...indicators,
+          // Risk
+          volatility20d,
+          maxDrawdown90d,
+          atr14,
+          tradedValue20d,
+          riskScore,
+          adjustedFinalScore,
+          // Scores
+          fundamentalScore,
+          technicalScore,
+          sectorScore,
+          marketScore,
+          finalScore,
+          marketRegime: regime,
+          // Prisma's Json input type wants `{ [key: string]: ... }`; our
+          // typed WeightsUsed is structurally a plain object — cast through
+          // unknown to satisfy the input.
+          weightsUsed: weightsUsed as unknown as Record<string, number>,
+        });
       } catch (error) {
         logger.error(`Failed to compute metrics for ${stock.symbol}:`, error);
       }
@@ -285,14 +262,12 @@ export class MarketDataService {
     // Get stocks that haven't been updated recently
     const cutoffDate = new Date(Date.now() - ALPHA_VANTAGE.CACHE_DAYS * 24 * 60 * 60 * 1000);
 
-    const stocks = await Stock.find({ isActive: true, isIndex: false }).lean();
+    const stocks = await stockRepo.findActiveTradable();
 
     // Prioritize stocks without fundamental data or with stale data
     const needsUpdate: typeof stocks = [];
     for (const stock of stocks) {
-      const metric = await StockMetric.findOne({ symbol: stock.symbol })
-        .sort({ date: -1 })
-        .lean();
+      const metric = await stockMetricRepo.findLatestBySymbol(stock.symbol);
 
       if (!metric?.fundamentalsUpdatedAt || metric.fundamentalsUpdatedAt < cutoffDate) {
         needsUpdate.push(stock);
@@ -315,34 +290,17 @@ export class MarketDataService {
               ? this.scoringService.computeEarningsConsistency(quarterlyEpsGrowth)
               : null;
 
-          // Update the latest existing metric (not by today's date)
-          // This ensures fundamentals land on the same doc that has technicals
-          const updated = await StockMetric.findOneAndUpdate(
-            { symbol: stock.symbol },
-            {
-              $set: {
-                ...rest,
-                quarterlyEpsGrowth,
-                earningsConsistencyScore,
-                fundamentalsUpdatedAt: new Date(),
-              },
-            },
-            { sort: { date: -1 }, new: true }
-          );
-
-          if (!updated) {
-            // No metric exists yet — create one for today
-            const today = new Date();
-            today.setHours(0, 0, 0, 0);
-            await StockMetric.create({
-              symbol: stock.symbol,
-              date: today,
-              ...rest,
-              quarterlyEpsGrowth,
-              earningsConsistencyScore,
-              fundamentalsUpdatedAt: new Date(),
-            });
-          }
+          // Land fundamentals on the most recent existing metric (not today's
+          // date) so technicals + fundamentals stay on the same row. If no
+          // metric exists yet, create one for today.
+          const today = new Date();
+          today.setHours(0, 0, 0, 0);
+          await stockMetricRepo.upsertLatestFundamentals(stock.symbol, today, {
+            ...rest,
+            quarterlyEpsGrowth,
+            earningsConsistencyScore,
+            fundamentalsUpdatedAt: new Date(),
+          });
 
           success++;
           logger.debug(`Updated fundamentals for ${stock.symbol}`);
@@ -370,14 +328,8 @@ export class MarketDataService {
 
     // Get historical candles for trend computation
     const [niftyCandles, bankNiftyCandles] = await Promise.all([
-      Candle.find({ stockToken: INDEX_TOKENS.NIFTY_50, interval: 'ONE_DAY' })
-        .sort({ timestamp: -1 })
-        .limit(200)
-        .lean(),
-      Candle.find({ stockToken: INDEX_TOKENS.BANK_NIFTY, interval: 'ONE_DAY' })
-        .sort({ timestamp: -1 })
-        .limit(200)
-        .lean(),
+      candleRepo.findRecent(INDEX_TOKENS.NIFTY_50, 'ONE_DAY', 200),
+      candleRepo.findRecent(INDEX_TOKENS.BANK_NIFTY, 'ONE_DAY', 200),
     ]);
 
     const buildIndexStatus = (
@@ -427,35 +379,24 @@ export class MarketDataService {
 
   /** Get sector rankings */
   async getSectorRankings(): Promise<SectorRanking[]> {
-    const sectors = await SectorData.find()
-      .sort({ date: -1 })
-      .lean();
-
-    // Get latest entry per sector
-    const latestMap = new Map<string, any>();
-    for (const s of sectors) {
-      if (!latestMap.has(s.sector)) {
-        latestMap.set(s.sector, s);
-      }
-    }
-
-    return Array.from(latestMap.values())
+    const sectors = await sectorDataRepo.findLatestPerSector();
+    return sectors
       .map((s) => ({
         sector: s.sector,
         avgChange: s.avgChange,
         sectorScore: s.sectorScore,
         stockCount: s.stockCount,
-        topGainer: s.topGainer,
-        topLoser: s.topLoser,
-        advances: s.advanceDecline.advances,
-        declines: s.advanceDecline.declines,
+        topGainer: { symbol: s.topGainerSymbol, change: s.topGainerChange },
+        topLoser: { symbol: s.topLoserSymbol, change: s.topLoserChange },
+        advances: s.advances,
+        declines: s.declines,
       }))
       .sort((a, b) => b.sectorScore - a.sectorScore);
   }
 
   /** Compute and store sector data */
   async computeSectorData(): Promise<void> {
-    const stocks = await Stock.find({ isActive: true, isIndex: false }).lean();
+    const stocks = await stockRepo.findActiveTradable();
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
@@ -468,10 +409,10 @@ export class MarketDataService {
     }
 
     for (const [sector, sectorStockList] of sectorStocks) {
-      const metrics = await StockMetric.find({
-        symbol: { $in: sectorStockList.map((s) => s.symbol) },
-        date: today,
-      }).lean();
+      const metrics = await stockMetricRepo.findOnDateForSymbols(
+        sectorStockList.map((s) => s.symbol),
+        today
+      );
 
       if (metrics.length === 0) continue;
 
@@ -493,22 +434,19 @@ export class MarketDataService {
         metrics.map((m) => m.technicalScore)
       );
 
-      await SectorData.findOneAndUpdate(
-        { sector, date: today },
-        {
-          sector,
-          date: today,
-          avgChange,
-          topGainer: sorted[0] ? { symbol: sorted[0].symbol, change: sorted[0].score } : { symbol: '', change: 0 },
-          topLoser: sorted[sorted.length - 1]
-            ? { symbol: sorted[sorted.length - 1].symbol, change: sorted[sorted.length - 1].score }
-            : { symbol: '', change: 0 },
-          sectorScore,
-          stockCount: sectorStockList.length,
-          advanceDecline: { advances, declines },
-        },
-        { upsert: true }
-      );
+      const top = sorted[0];
+      const bottom = sorted[sorted.length - 1];
+      await sectorDataRepo.upsertOnSectorDate(sector, today, {
+        avgChange,
+        topGainerSymbol: top ? top.symbol : '',
+        topGainerChange: top ? top.score : 0,
+        topLoserSymbol: bottom ? bottom.symbol : '',
+        topLoserChange: bottom ? bottom.score : 0,
+        sectorScore,
+        stockCount: sectorStockList.length,
+        advances,
+        declines,
+      });
     }
 
     logger.info('Finished computing sector data');
@@ -524,12 +462,11 @@ export class MarketDataService {
     today: Date,
     niftyClose: number
   ): Promise<MarketRegime> {
-    const history = await MarketState.find({ date: { $lt: today } })
-      .sort({ date: -1 })
-      .limit(REGIME_SMOOTHING_DAYS - 1)
-      .lean();
+    const history = await marketStateRepo.findRecentBefore(today, REGIME_SMOOTHING_DAYS - 1);
 
-    const previousRegime = history[0]?.regime;
+    // Prisma stores regime as String; the column only ever holds a MarketRegime
+    // value because every writer goes through this same code path.
+    const previousRegime = history[0]?.regime as MarketRegime | undefined;
     const recentRaw = [rawRegime, ...history.map((h) => h.rawRegime)];
 
     let resolvedRegime: MarketRegime;
@@ -548,11 +485,12 @@ export class MarketDataService {
       smoothed = true;
     }
 
-    await MarketState.findOneAndUpdate(
-      { date: today },
-      { date: today, rawRegime, regime: resolvedRegime, smoothed, niftyClose },
-      { upsert: true }
-    );
+    await marketStateRepo.upsertOnDate(today, {
+      rawRegime,
+      regime: resolvedRegime,
+      smoothed,
+      niftyClose,
+    });
 
     return resolvedRegime;
   }

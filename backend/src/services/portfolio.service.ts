@@ -1,7 +1,8 @@
-import { Portfolio, IPortfolio } from '../models/Portfolio';
-import { Stock } from '../models/Stock';
-import { StockMetric } from '../models/StockMetric';
-import { Candle } from '../models/Candle';
+import type { Portfolio } from '@prisma/client';
+import { portfolioRepo, parseIntId } from '../repositories/portfolio.repo';
+import { stockRepo } from '../repositories/stock.repo';
+import { candleRepo } from '../repositories/candle.repo';
+import { stockMetricRepo } from '../repositories/stockmetric.repo';
 import { SmartAPIService } from './smartapi.service';
 import { IndicatorService } from './indicator.service';
 import { AppError } from '../middleware/error-handler';
@@ -36,13 +37,13 @@ export class PortfolioService {
 
   /** Get all active holdings with live P&L */
   async getHoldings() {
-    const holdings = await Portfolio.find({ status: 'ACTIVE' }).lean();
+    const holdings = await portfolioRepo.findActive();
 
     if (holdings.length === 0) return [];
 
     // Fetch live prices
     const symbols = holdings.map((h) => h.symbol);
-    const stocks = await Stock.find({ symbol: { $in: symbols } }).lean();
+    const stocks = await stockRepo.findManyBySymbols(symbols);
     const tokenMap = new Map(stocks.map((s) => [s.symbol, s.token]));
     const tokens = stocks.map((s) => s.token);
 
@@ -97,17 +98,19 @@ export class PortfolioService {
     stopLoss?: number;
     targetPrice?: number;
     notes?: string;
-  }): Promise<IPortfolio> {
-    const stock = await Stock.findOne({ symbol: data.symbol.toUpperCase() });
+  }): Promise<Portfolio> {
+    const stock = await stockRepo.findBySymbol(data.symbol.toUpperCase());
     if (!stock) throw new AppError(404, `Stock ${data.symbol} not found`);
 
-    const holding = await Portfolio.create({
-      ...data,
+    const holding = await portfolioRepo.create({
       symbol: data.symbol.toUpperCase(),
+      quantity: data.quantity,
+      avgBuyPrice: data.avgBuyPrice,
+      buyDate: data.buyDate,
       currentPrice: data.avgBuyPrice,
-      pnl: 0,
-      pnlPercent: 0,
-      status: 'ACTIVE',
+      stopLoss: data.stopLoss ?? null,
+      targetPrice: data.targetPrice ?? null,
+      notes: data.notes ?? '',
     });
 
     logger.info(`Added holding: ${data.symbol} x${data.quantity} @ ${data.avgBuyPrice}`);
@@ -115,32 +118,40 @@ export class PortfolioService {
   }
 
   /** Update a holding */
-  async updateHolding(id: string, updates: Partial<IPortfolio>): Promise<IPortfolio> {
-    const holding = await Portfolio.findByIdAndUpdate(id, updates, { new: true });
+  async updateHolding(idStr: string, updates: Partial<Portfolio>): Promise<Portfolio> {
+    const id = parseIntId(idStr);
+    if (id === null) throw new AppError(404, 'Holding not found');
+    const holding = await portfolioRepo.update(id, updates);
     if (!holding) throw new AppError(404, 'Holding not found');
     return holding;
   }
 
   /** Remove a holding */
-  async removeHolding(id: string): Promise<void> {
-    const result = await Portfolio.findByIdAndDelete(id);
-    if (!result) throw new AppError(404, 'Holding not found');
+  async removeHolding(idStr: string): Promise<void> {
+    const id = parseIntId(idStr);
+    if (id === null) throw new AppError(404, 'Holding not found');
+    const ok = await portfolioRepo.delete(id);
+    if (!ok) throw new AppError(404, 'Holding not found');
   }
 
   /** Exit a holding (mark as sold) */
-  async exitHolding(id: string, exitPrice: number): Promise<IPortfolio> {
-    const holding = await Portfolio.findById(id);
+  async exitHolding(idStr: string, exitPrice: number): Promise<Portfolio> {
+    const id = parseIntId(idStr);
+    if (id === null) throw new AppError(404, 'Holding not found');
+    const holding = await portfolioRepo.findById(id);
     if (!holding) throw new AppError(404, 'Holding not found');
 
-    holding.status = 'EXITED';
-    holding.exitPrice = exitPrice;
-    holding.exitDate = new Date();
-    holding.pnl = (exitPrice - holding.avgBuyPrice) * holding.quantity;
-    holding.pnlPercent = ((exitPrice - holding.avgBuyPrice) / holding.avgBuyPrice) * 100;
-    await holding.save();
+    const updated = await portfolioRepo.update(id, {
+      status: 'EXITED',
+      exitPrice,
+      exitDate: new Date(),
+      pnl: (exitPrice - holding.avgBuyPrice) * holding.quantity,
+      pnlPercent: ((exitPrice - holding.avgBuyPrice) / holding.avgBuyPrice) * 100,
+    });
+    if (!updated) throw new AppError(404, 'Holding not found');
 
-    logger.info(`Exited holding: ${holding.symbol} @ ${exitPrice}, P&L: ${holding.pnl}`);
-    return holding;
+    logger.info(`Exited holding: ${updated.symbol} @ ${exitPrice}, P&L: ${updated.pnl}`);
+    return updated;
   }
 
   /** Sector exposure breakdown for active holdings. */
@@ -149,7 +160,7 @@ export class PortfolioService {
     if (holdings.length === 0) return [];
 
     const symbols = holdings.map((h) => h.symbol);
-    const stocks = await Stock.find({ symbol: { $in: symbols } }).select('symbol sector').lean();
+    const stocks = await stockRepo.findManyBySymbolsWithSector(symbols);
     const sectorBySymbol = new Map(stocks.map((s) => [s.symbol, s.sector]));
 
     const sectorValue = new Map<string, number>();
@@ -205,22 +216,19 @@ export class PortfolioService {
    * Uses last CORRELATION_LOOKBACK_DAYS daily closes from the Candle collection.
    */
   async getCorrelationWithHoldings(symbol: string): Promise<CorrelationEntry[]> {
-    const candidate = await Stock.findOne({ symbol: symbol.toUpperCase() }).lean();
+    const candidate = await stockRepo.findBySymbol(symbol.toUpperCase());
     if (!candidate) throw new AppError(404, `Stock ${symbol} not found`);
 
-    const holdings = await Portfolio.find({ status: 'ACTIVE' }).lean();
+    const holdings = await portfolioRepo.findActive();
     if (holdings.length === 0) return [];
 
     const heldSymbols = [...new Set(holdings.map((h) => h.symbol))];
-    const heldStocks = await Stock.find({ symbol: { $in: heldSymbols } }).lean();
+    const heldStocks = await stockRepo.findManyBySymbols(heldSymbols);
     const heldMap = new Map(heldStocks.map((s) => [s.symbol, s]));
 
     const lookback = PORTFOLIO_LIMITS.CORRELATION_LOOKBACK_DAYS;
 
-    const candidateCandles = await Candle.find({ stockToken: candidate.token, interval: 'ONE_DAY' })
-      .sort({ timestamp: -1 })
-      .limit(lookback)
-      .lean();
+    const candidateCandles = await candleRepo.findRecent(candidate.token, 'ONE_DAY', lookback);
     if (candidateCandles.length < 3) return [];
     const candidateByTs = new Map(
       candidateCandles.map((c) => [c.timestamp.toISOString().slice(0, 10), c.close])
@@ -231,10 +239,7 @@ export class PortfolioService {
       if (heldSym === candidate.symbol) continue;
       const held = heldMap.get(heldSym);
       if (!held) continue;
-      const heldCandles = await Candle.find({ stockToken: held.token, interval: 'ONE_DAY' })
-        .sort({ timestamp: -1 })
-        .limit(lookback)
-        .lean();
+      const heldCandles = await candleRepo.findRecent(held.token, 'ONE_DAY', lookback);
 
       // Align by date: intersect the two series on same-day closes.
       const alignedCandidate: number[] = [];
@@ -267,7 +272,7 @@ export class PortfolioService {
    */
   async canAddPosition(symbol: string, capital: number): Promise<CanAddPositionResult> {
     const upper = symbol.toUpperCase();
-    const candidate = await Stock.findOne({ symbol: upper }).lean();
+    const candidate = await stockRepo.findBySymbol(upper);
     if (!candidate) throw new AppError(404, `Stock ${symbol} not found`);
 
     const exposure = await this.getSectorExposure();
@@ -317,14 +322,8 @@ export class PortfolioService {
     const holdings = await this.getHoldings();
     if (holdings.length === 0) return 0;
     const symbols = [...new Set(holdings.map((h) => h.symbol))];
-    const metrics = await StockMetric.find({ symbol: { $in: symbols } })
-      .sort({ date: -1 })
-      .lean();
-    // Take latest per symbol.
-    const latestBySymbol = new Map<string, number>();
-    for (const m of metrics) {
-      if (!latestBySymbol.has(m.symbol)) latestBySymbol.set(m.symbol, m.riskScore ?? 50);
-    }
+    const metrics = await stockMetricRepo.findLatestByManySymbols(symbols);
+    const latestBySymbol = new Map<string, number>(metrics.map((m) => [m.symbol, m.riskScore ?? 50]));
     let weightedSum = 0;
     let totalValue = 0;
     for (const h of holdings) {

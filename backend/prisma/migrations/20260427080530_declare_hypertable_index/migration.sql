@@ -1,0 +1,4 @@
+-- No-op migration that records the schema's awareness of the
+-- `candles_timestamp_idx` index that TimescaleDB's create_hypertable() added
+-- in the previous migration. The index already exists; this migration just
+-- pins the prisma <-> db state so future `migrate dev` runs don't see drift.

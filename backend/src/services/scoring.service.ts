@@ -1,6 +1,6 @@
 import { LIQUIDITY_THRESHOLDS, MarketRegime, RISK_PENALTY, SCORE_WEIGHTS, WEIGHT_CONFIG } from '../config/constants';
 import { Indicators } from '../types/analysis.types';
-import { IStockMetric } from '../models/StockMetric';
+import type { StockMetric } from '@prisma/client';
 
 export interface WeightsUsed {
   market: number;
@@ -16,7 +16,7 @@ export interface FinalScoreResult {
 
 export class ScoringService {
   /** Compute fundamental score (0-100) based on financial metrics */
-  computeFundamentalScore(metric: Partial<IStockMetric>): number {
+  computeFundamentalScore(metric: Partial<StockMetric>): number {
     let score = 0;
     let factorCount = 0;
 

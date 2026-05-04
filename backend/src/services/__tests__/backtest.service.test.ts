@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { CandleRow, computeMetrics, simulateTrade } from '../backtest.service';
-import { EquityPoint } from '../../models/BacktestRun';
+import { EquityPoint } from '../../types/backtest.types';
 
 function makeCandle(day: number, o: number, h: number, l: number, c: number): CandleRow {
   return {

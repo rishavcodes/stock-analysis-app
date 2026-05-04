@@ -17,7 +17,9 @@
       "Bash(node -e \"const { SmartAPI } = require\\(''smartapi-javascript''\\); console.log\\(new SmartAPI\\({ api_key: ''test'' }\\).marketData.toString\\(\\)\\)\")",
       "Bash(node -e ':*)",
       "Bash(grep -E \"\\\\.\\(tsx?|jsx?\\)$\")",
-      "Bash(npm run *)"
+      "Bash(npm run *)",
+      "Bash(xargs -I {} basename {})",
+      "Bash(npx prisma *)"
     ]
   }
 }

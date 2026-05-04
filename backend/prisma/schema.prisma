@@ -1,0 +1,318 @@
+// Prisma schema for the Postgres side of the stock-analysis app.
+// AnalysisLog intentionally stays in MongoDB (see src/models/AnalysisLog.ts);
+// every other model is being migrated here phase-by-phase. See
+// docs/POSTGRES_MIGRATION.md for the phase order.
+//
+// Docs: https://www.prisma.io/docs/orm/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+  // Generate the client into node_modules/@prisma/client (default location).
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+
+  // directUrl is used for migrations. Supabase gives you two connection
+  // strings: a pgBouncer (pooled) URL for app runtime and a direct URL for
+  // migrations. Both should live in .env. See docs/POSTGRES_SETUP.md.
+  directUrl = env("DIRECT_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Models are added incrementally, one per migration phase. See
+// docs/POSTGRES_MIGRATION.md:
+//   Phase 1: Stock
+//   Phase 2: Candle (TimescaleDB hypertable)
+//   Phase 3: StockMetric
+//   Phase 4: SectorData, MarketState
+//   Phase 5: Portfolio, Alert, User
+//   Phase 6: BacktestRun, BacktestTrade         ← active
+//   Phase 4: SectorData, MarketState
+//   Phase 5: Portfolio, Alert, User
+//   Phase 6: BacktestRun, BacktestTrade
+//   Phase 7: cleanup — remove Mongoose for migrated models
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Stock = the instrument master. One row per tradable equity. Joined to every
+// other model via `symbol` (string), so we keep `symbol` unique and indexed.
+// `token` is Angel One's numeric identifier; also unique because the daily
+// instrument-master sync upserts on it.
+model Stock {
+  id          Int      @id @default(autoincrement())
+  symbol      String   @unique
+  token       String   @unique
+  name        String
+  exchange    String   @default("NSE")
+  segment     String   @default("EQ")
+  sector      String   @default("Unknown")
+  isin        String   @default("")
+  lotSize     Int      @default(1)
+  isIndex     Boolean  @default(false)
+  isActive    Boolean  @default(true)
+  lastUpdated DateTime @default(now())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([sector])
+  @@map("stocks")
+}
+
+// Candle = OHLCV bar for a (stockToken, interval) at a point in time.
+// Composite PK matches the access pattern: every read filters by stockToken
+// and interval and orders by timestamp. The PK doubles as the index Postgres
+// uses for those queries — no extra index needed.
+//
+// This table is converted to a TimescaleDB hypertable in the same migration
+// (see migration.sql). Hypertables partition rows into chunks by `timestamp`,
+// which makes range scans cheap and keeps insert/index maintenance O(chunk)
+// instead of O(table) as the data grows.
+model Candle {
+  stockToken String
+  interval   String
+  timestamp  DateTime
+  open       Float
+  high       Float
+  low        Float
+  close      Float
+  volume     Float
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@id([stockToken, interval, timestamp])
+  // create_hypertable() auto-adds an index on the partitioning column.
+  // We declare it here so Prisma's drift detection stays clean.
+  @@index([timestamp(sort: Desc)], map: "candles_timestamp_idx")
+  @@map("candles")
+}
+
+// StockMetric = one row per (symbol, date) snapshot of fundamentals,
+// technicals, scores, risk, and regime/weights. The composite unique
+// (symbol, date) is the natural key — the metric-compute pipeline upserts on
+// it daily. Other access patterns: latest-per-symbol (alerts, AI input,
+// detail page) and finalScore-ranked screener.
+//
+// Fundamentals stay null until Yahoo Finance has populated them. Technicals
+// and scores have numeric defaults so freshly-created rows still render in
+// the UI without NaN handling. `weightsUsed` is JSONB because its shape is a
+// small fixed record we never query into; `quarterlyEpsGrowth` is a native
+// Postgres `double precision[]` so the consistency calculator gets a real
+// number array back.
+model StockMetric {
+  id   Int      @id @default(autoincrement())
+  symbol String
+  date   DateTime
+
+  // Fundamentals — nullable; populated by the Yahoo Finance batch job.
+  pe                       Float?
+  roe                      Float?
+  roce                     Float?
+  debtToEquity             Float?
+  revenueGrowthYoY         Float?
+  profitGrowthYoY          Float?
+  profitMargin             Float?
+  marketCap                Float?
+  bookValue                Float?
+  dividendYield            Float?
+  promoterHolding          Float?
+  quarterlyEpsGrowth       Float[]  @default([])
+  earningsConsistencyScore Float?
+
+  // Technicals — computed daily from candles. Defaults match the Mongoose
+  // schema so historical reads stay consistent.
+  sma20          Float @default(0)
+  sma50          Float @default(0)
+  sma200         Float @default(0)
+  ema20          Float @default(0)
+  rsi14          Float @default(50)
+  macdLine       Float @default(0)
+  macdSignal     Float @default(0)
+  macdHistogram  Float @default(0)
+  bollingerUpper Float @default(0)
+  bollingerLower Float @default(0)
+  avgVolume20    Float @default(0)
+  volumeRatio    Float @default(1)
+
+  // Composite scores (0–100) and the risk-adjusted final.
+  fundamentalScore   Float @default(0)
+  technicalScore     Float @default(0)
+  sectorScore        Float @default(0)
+  marketScore        Float @default(0)
+  finalScore         Float @default(0)
+  volatility20d      Float @default(0)
+  maxDrawdown90d     Float @default(0)
+  atr14              Float @default(0)
+  tradedValue20d     Float @default(0)
+  riskScore          Float @default(0)
+  adjustedFinalScore Float @default(0)
+
+  // Discrete signals.
+  isBreakout     Boolean @default(false)
+  breakoutType   String?
+  trendDirection String  @default("SIDEWAYS")
+
+  // Regime / weights snapshot.
+  marketRegime String?
+  weightsUsed  Json?
+
+  fundamentalsUpdatedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([symbol, date])
+  @@index([finalScore(sort: Desc)])
+  @@index([adjustedFinalScore(sort: Desc)])
+  @@map("stock_metrics")
+}
+
+// SectorData = one row per (sector, date) snapshot of sector aggregates.
+// Mongoose stored topGainer / topLoser / advanceDecline as nested objects;
+// we flatten them to scalar columns so the data is queryable without going
+// through JSONB. The route layer reassembles the nested shape for the API
+// response.
+model SectorData {
+  id              Int      @id @default(autoincrement())
+  sector          String
+  date            DateTime
+  avgChange       Float    @default(0)
+  topGainerSymbol String   @default("")
+  topGainerChange Float    @default(0)
+  topLoserSymbol  String   @default("")
+  topLoserChange  Float    @default(0)
+  sectorScore     Float    @default(0)
+  stockCount      Int      @default(0)
+  advances        Int      @default(0)
+  declines        Int      @default(0)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([sector, date])
+  @@map("sector_data")
+}
+
+// MarketState = one row per trading day persisting the smoothed regime
+// decision so today's compute can compare against the last N days. `date`
+// is the natural unique key.
+model MarketState {
+  id         Int      @id @default(autoincrement())
+  date       DateTime @unique
+  rawRegime  String
+  regime     String
+  smoothed   Boolean  @default(false)
+  niftyClose Float
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([date(sort: Desc)])
+  @@map("market_state")
+}
+
+// Portfolio = one row per position the user has opened. Status flips from
+// ACTIVE → EXITED on sale; we keep exited rows around for P&L history rather
+// than deleting. Mongo identified rows by ObjectId; here we use Int auto-id —
+// the route layer parses the string `:id` path param to a number.
+model Portfolio {
+  id           Int       @id @default(autoincrement())
+  symbol       String
+  quantity     Int
+  avgBuyPrice  Float
+  buyDate      DateTime
+  currentPrice Float     @default(0)
+  pnl          Float     @default(0)
+  pnlPercent   Float     @default(0)
+  stopLoss     Float?
+  targetPrice  Float?
+  notes        String    @default("")
+  status       String    @default("ACTIVE")
+  exitPrice    Float?
+  exitDate     DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([symbol, status])
+  @@map("portfolio")
+}
+
+// Alert = one configurable price/score/event trigger. `type` is an app-level
+// enum (PRICE_ABOVE / PRICE_BELOW / VOLUME_SPIKE / BREAKOUT / STOP_LOSS /
+// TARGET_HIT / SCORE_CHANGE) — kept as String for flexibility; the alert
+// service handles each type.
+model Alert {
+  id          Int       @id @default(autoincrement())
+  symbol      String
+  type        String
+  threshold   Float
+  isActive    Boolean   @default(true)
+  isTriggered Boolean   @default(false)
+  triggeredAt DateTime?
+  message     String    @default("")
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([isActive, symbol])
+  @@map("alerts")
+}
+
+// User = currently a placeholder. The Mongoose model exists but no service or
+// route consumes it. Defined here so the schema reaches parity with Mongo;
+// when auth / multi-tenancy land later, we extend this row rather than
+// inventing a new table. `preferences` stays as Json since nothing reads it.
+model User {
+  id          Int      @id @default(autoincrement())
+  name        String   @default("Default User")
+  email       String   @default("")
+  watchlist   String[] @default([])
+  preferences Json?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("users")
+}
+
+// BacktestRun = one row per simulation. `config` and `results` stay as JSONB
+// blobs — neither is ever queried by sub-field; they're opaque payloads
+// the service writes once and the route reads back. Keeping them as Json
+// also lets the TS interfaces (BacktestConfig / BacktestResults) evolve
+// without DB migrations.
+model BacktestRun {
+  id          Int       @id @default(autoincrement())
+  config      Json
+  status      String    @default("PENDING")
+  startedAt   DateTime?
+  completedAt DateTime?
+  results     Json?
+  error       String?
+  trades      BacktestTrade[]
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([status, startedAt(sort: Desc)])
+  @@map("backtest_runs")
+}
+
+// BacktestTrade = one row per simulated trade in a run. FK to BacktestRun;
+// no cascade — the app never deletes runs, so we match Mongoose's behaviour
+// (orphaned rows would be a data-integrity issue we'd fix at the call site,
+// not by silently destroying trade history on a deletion bug).
+model BacktestTrade {
+  id           Int      @id @default(autoincrement())
+  runId        Int
+  symbol       String
+  sector       String
+  entryDate    DateTime
+  entryPrice   Float
+  exitDate     DateTime
+  exitPrice    Float
+  returnPct    Float
+  exitReason   String
+  scoreAtEntry Float
+  qty          Int
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  run          BacktestRun @relation(fields: [runId], references: [id])
+
+  @@index([runId, entryDate])
+  @@map("backtest_trades")
+}

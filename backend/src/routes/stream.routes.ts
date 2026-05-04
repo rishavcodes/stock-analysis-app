@@ -1,5 +1,5 @@
 import { Router, Request, Response, NextFunction } from 'express';
-import { Stock } from '../models/Stock';
+import { stockRepo } from '../repositories/stock.repo';
 import { getMarketStream } from '../services/market-stream.singleton';
 import { Tick } from '../services/market-stream.service';
 import { logger } from '../utils/logger';
@@ -16,7 +16,7 @@ const router = Router();
 router.get('/ltp/:symbol', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const symbol = (req.params.symbol as string).toUpperCase();
-    const stock = await Stock.findOne({ symbol }).lean();
+    const stock = await stockRepo.findBySymbol(symbol);
     if (!stock) {
       res.status(404).json({ success: false, error: `Stock ${symbol} not found` });
       return;

@@ -1,6 +1,6 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { AnalysisLog } from '../models/AnalysisLog';
-import { Stock } from '../models/Stock';
+import { stockRepo } from '../repositories/stock.repo';
 
 const router = Router();
 
@@ -24,7 +24,7 @@ router.get('/accuracy', async (req: Request, res: Response, next: NextFunction) 
 
     // Sector filter requires joining Stock by symbol. Build a symbol list from Stock first.
     if (sector) {
-      const stocks = await Stock.find({ sector }).select('symbol').lean();
+      const stocks = await stockRepo.findSymbolsBySector(sector);
       match.symbol = { $in: stocks.map((s) => s.symbol) };
     }
 
@@ -40,7 +40,7 @@ router.get('/accuracy', async (req: Request, res: Response, next: NextFunction) 
       const sectorBySymbol = new Map<string, string>();
       if (group === 'sector') {
         const allSymbols = [...new Set(logs.map((l) => l.symbol))];
-        const stocks = await Stock.find({ symbol: { $in: allSymbols } }).select('symbol sector').lean();
+        const stocks = await stockRepo.findManyBySymbolsWithSector(allSymbols);
         stocks.forEach((s) => sectorBySymbol.set(s.symbol, s.sector));
       }
       const bucket = new Map<string, typeof logs>();

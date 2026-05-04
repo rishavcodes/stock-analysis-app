@@ -1,9 +1,9 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { env } from '../config/env';
-import { Stock } from '../models/Stock';
-import { Candle } from '../models/Candle';
-import { StockMetric } from '../models/StockMetric';
-import { SectorData } from '../models/SectorData';
+import { stockRepo } from '../repositories/stock.repo';
+import { candleRepo } from '../repositories/candle.repo';
+import { stockMetricRepo } from '../repositories/stockmetric.repo';
+import { sectorDataRepo } from '../repositories/sectordata.repo';
 import { AnalysisLog } from '../models/AnalysisLog';
 import { AnalysisOutput, AnalysisOutputSchema, DecisionTrace, DecisionTraceSchema, StockAnalysisInput } from '../types/analysis.types';
 import { AI_CACHE, INDEX_TOKENS } from '../config/constants';
@@ -156,20 +156,14 @@ export class AIAnalysisService {
 
   /** Build the analysis input from database data */
   private async buildInput(symbol: string): Promise<StockAnalysisInput> {
-    const stock = await Stock.findOne({ symbol }).lean();
+    const stock = await stockRepo.findBySymbol(symbol);
     if (!stock) throw new AppError(404, `Stock ${symbol} not found`);
 
     const [metric, candles, sectorData, niftyCandles] = await Promise.all([
-      StockMetric.findOne({ symbol }).sort({ date: -1 }).lean(),
-      Candle.find({ stockToken: stock.token, interval: 'ONE_DAY' })
-        .sort({ timestamp: -1 })
-        .limit(60)
-        .lean(),
-      SectorData.findOne({ sector: stock.sector }).sort({ date: -1 }).lean(),
-      Candle.find({ stockToken: INDEX_TOKENS.NIFTY_50, interval: 'ONE_DAY' })
-        .sort({ timestamp: -1 })
-        .limit(5)
-        .lean(),
+      stockMetricRepo.findLatestBySymbol(symbol),
+      candleRepo.findRecent(stock.token, 'ONE_DAY', 60),
+      sectorDataRepo.findLatestBySector(stock.sector),
+      candleRepo.findRecent(INDEX_TOKENS.NIFTY_50, 'ONE_DAY', 5),
     ]);
 
     if (!metric) throw new AppError(400, `No metrics available for ${symbol}. Run metric computation first.`);

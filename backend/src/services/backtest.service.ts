@@ -1,10 +1,10 @@
-import { Types } from 'mongoose';
 import PQueue from 'p-queue';
-import { BacktestRun, BacktestConfig, BacktestResults, EquityPoint, IBacktestRun } from '../models/BacktestRun';
-import { BacktestTrade, TradeExitReason } from '../models/BacktestTrade';
-import { StockMetric } from '../models/StockMetric';
-import { Candle } from '../models/Candle';
-import { Stock } from '../models/Stock';
+import type { BacktestRun } from '@prisma/client';
+import { backtestRepo } from '../repositories/backtest.repo';
+import type { BacktestConfig, BacktestResults, EquityPoint, TradeExitReason } from '../types/backtest.types';
+import { stockMetricRepo } from '../repositories/stockmetric.repo';
+import { candleRepo } from '../repositories/candle.repo';
+import { stockRepo } from '../repositories/stock.repo';
 import { logger } from '../utils/logger';
 
 export interface CandleRow {
@@ -134,44 +134,46 @@ export class BacktestService {
   private queue = new PQueue({ concurrency: 1 });
 
   /** Enqueue a run; returns immediately with a PENDING record. */
-  async enqueue(config: BacktestConfig): Promise<IBacktestRun> {
-    const run = await BacktestRun.create({ config, status: 'PENDING' });
-    this.queue.add(() => this.execute(run._id as Types.ObjectId)).catch((err) => {
-      logger.error(`Backtest queue error for ${run._id}:`, err);
+  async enqueue(config: BacktestConfig): Promise<BacktestRun> {
+    const run = await backtestRepo.createRun(config);
+    this.queue.add(() => this.execute(run.id)).catch((err) => {
+      logger.error(`Backtest queue error for ${run.id}:`, err);
     });
     return run;
   }
 
   /** Actually execute a queued run. */
-  private async execute(runId: Types.ObjectId): Promise<void> {
-    const run = await BacktestRun.findById(runId);
+  private async execute(runId: number): Promise<void> {
+    const run = await backtestRepo.findRunById(runId);
     if (!run) {
       logger.error(`Backtest run ${runId} not found`);
       return;
     }
-    run.status = 'RUNNING';
-    run.startedAt = new Date();
-    await run.save();
+    await backtestRepo.updateRun(runId, { status: 'RUNNING', startedAt: new Date() });
 
     try {
       const results = await this.runInternal(run);
-      run.results = results;
-      run.status = 'DONE';
-      run.completedAt = new Date();
-      await run.save();
+      await backtestRepo.updateRun(runId, {
+        status: 'DONE',
+        results,
+        completedAt: new Date(),
+      });
       logger.info(`Backtest ${runId} DONE: trades=${results.totalTrades} winRate=${(results.winRate * 100).toFixed(1)}%`);
     } catch (error: any) {
       logger.error(`Backtest ${runId} FAILED:`, error);
-      run.status = 'FAILED';
-      run.error = error?.message ?? String(error);
-      run.completedAt = new Date();
-      await run.save();
+      await backtestRepo.updateRun(runId, {
+        status: 'FAILED',
+        error: error?.message ?? String(error),
+        completedAt: new Date(),
+      });
     }
   }
 
   /** Core simulation loop. Separated for readability. */
-  private async runInternal(run: IBacktestRun): Promise<BacktestResults> {
-    const cfg = run.config;
+  private async runInternal(run: BacktestRun): Promise<BacktestResults> {
+    // Postgres stores `config` as jsonb; the typed shape is owned by the
+    // BacktestConfig interface and never modified through the column.
+    const cfg = run.config as unknown as BacktestConfig;
     const notes: string[] = [];
 
     if (!cfg.useHistoricalSectors) {
@@ -180,12 +182,9 @@ export class BacktestService {
     notes.push('Universe derived from StockMetric rows in range (survivorship bias: only stocks present in the DB for the window).');
 
     // Iterate trading days in range. Use StockMetric distinct dates as the day axis.
-    const dayBoundaries = await StockMetric.distinct('date', {
-      date: { $gte: cfg.from, $lte: cfg.to },
-    });
-    const tradingDays = (dayBoundaries as Date[]).sort((a, b) => a.getTime() - b.getTime());
+    const tradingDays = await stockMetricRepo.distinctDatesInRange(cfg.from, cfg.to);
 
-    const stocks = await Stock.find({ isIndex: false }).lean();
+    const stocks = await stockRepo.findAllNonIndex();
     const tokenBySymbol = new Map(stocks.map((s) => [s.symbol, s.token]));
     const sectorBySymbol = new Map(stocks.map((s) => [s.symbol, s.sector]));
 
@@ -201,9 +200,7 @@ export class BacktestService {
       if (candleCache.has(symbol)) return candleCache.get(symbol)!;
       const token = tokenBySymbol.get(symbol);
       if (!token) return [];
-      const candles = await Candle.find({ stockToken: token, interval: 'ONE_DAY' })
-        .sort({ timestamp: 1 })
-        .lean();
+      const candles = await candleRepo.findAllAsc(token, 'ONE_DAY');
       const rows = candles.map((c) => ({
         timestamp: c.timestamp,
         open: c.open,
@@ -223,13 +220,7 @@ export class BacktestService {
         if (futureCandles.length === 0) continue;
 
         // Build technicalScoreByDate for TECHNICAL exits (bounded to dates <= current day).
-        const metricRows = await StockMetric.find({
-          symbol: sym,
-          date: { $gt: pos.entryDate, $lte: day },
-        })
-          .select('date technicalScore')
-          .sort({ date: 1 })
-          .lean();
+        const metricRows = await stockMetricRepo.findTechnicalScoreInRange(sym, pos.entryDate, day);
         const tsMap = new Map(metricRows.map((m) => [dateKey(m.date), m.technicalScore]));
 
         const sim = simulateTrade({
@@ -247,7 +238,7 @@ export class BacktestService {
           const pnl = (sim.exitPrice - sim.entryPrice) * pos.qty;
           equity += pnl;
           tradeRows.push({
-            runId: run._id,
+            runId: run.id,
             symbol: sym,
             sector: sectorBySymbol.get(sym) ?? 'Unknown',
             entryDate: sim.entryDate,
@@ -265,12 +256,7 @@ export class BacktestService {
 
       // Then check for new entries (lookahead-safe: StockMetric.date <= day).
       if (openPositions.size < cfg.maxConcurrentPositions) {
-        const candidates = await StockMetric.find({
-          date: day,
-          finalScore: { $gte: cfg.scoreThreshold },
-        })
-          .sort({ finalScore: -1 })
-          .lean();
+        const candidates = await stockMetricRepo.findCandidatesOnDateAboveScore(day, cfg.scoreThreshold);
 
         for (const cand of candidates) {
           if (openPositions.size >= cfg.maxConcurrentPositions) break;
@@ -322,7 +308,7 @@ export class BacktestService {
       trades.push(sim);
       equity += (sim.exitPrice - sim.entryPrice) * pos.qty;
       tradeRows.push({
-        runId: run._id,
+        runId: run.id,
         symbol: sym,
         sector: sectorBySymbol.get(sym) ?? 'Unknown',
         entryDate: sim.entryDate,
@@ -337,7 +323,7 @@ export class BacktestService {
     }
 
     if (tradeRows.length > 0) {
-      await BacktestTrade.insertMany(tradeRows);
+      await backtestRepo.insertTrades(tradeRows);
     }
 
     const summary = computeMetrics(trades, equityCurve);

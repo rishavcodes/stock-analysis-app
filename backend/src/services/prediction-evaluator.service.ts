@@ -1,6 +1,6 @@
 import { AnalysisLog, IAnalysisLog, IPredictionOutcome, PredictionExitReason, PredictionResult } from '../models/AnalysisLog';
-import { Stock } from '../models/Stock';
-import { Candle } from '../models/Candle';
+import { stockRepo } from '../repositories/stock.repo';
+import { candleRepo } from '../repositories/candle.repo';
 import { HORIZON_DAYS, NEUTRAL_THRESHOLD_PCT } from '../config/constants';
 import { logger } from '../utils/logger';
 
@@ -111,7 +111,7 @@ export class PredictionEvaluatorService {
 
     // Bulk-load stock tokens.
     const symbols = [...new Set(candidates.map((c) => c.symbol))];
-    const stocks = await Stock.find({ symbol: { $in: symbols } }).lean();
+    const stocks = await stockRepo.findManyBySymbols(symbols);
     const tokenMap = new Map(stocks.map((s) => [s.symbol, s.token]));
 
     let evaluated = 0;
@@ -143,13 +143,7 @@ export class PredictionEvaluatorService {
         continue;
       }
 
-      const candles = await Candle.find({
-        stockToken: token,
-        interval: 'ONE_DAY',
-        timestamp: { $gt: log.analysisDate, $lte: horizonEnd },
-      })
-        .sort({ timestamp: 1 })
-        .lean();
+      const candles = await candleRepo.findInRange(token, 'ONE_DAY', log.analysisDate, horizonEnd);
 
       const outcome = evaluateCandles(
         {
