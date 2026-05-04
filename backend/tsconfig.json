@@ -12,17 +12,7 @@
     "resolveJsonModule": true,
     "declaration": true,
     "declarationMap": true,
-    "sourceMap": true,
-    "baseUrl": "./src",
-    "paths": {
-      "@config/*": ["config/*"],
-      "@models/*": ["models/*"],
-      "@services/*": ["services/*"],
-      "@routes/*": ["routes/*"],
-      "@middleware/*": ["middleware/*"],
-      "@utils/*": ["utils/*"],
-      "@types/*": ["types/*"]
-    }
+    "sourceMap": true
   },
   "files": ["src/types/smartapi.d.ts"],
   "include": ["src/**/*"],
