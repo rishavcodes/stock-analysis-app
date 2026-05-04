@@ -15,11 +15,14 @@ CREATE TABLE "candles" (
 );
 
 -- Convert candles into a TimescaleDB hypertable partitioned by `timestamp`.
--- This must run AFTER the CREATE TABLE above. The table is empty here, so
--- migrate_data is unnecessary; if_not_exists keeps the migration idempotent
--- if you re-run against an already-hypertabled DB.
-SELECT create_hypertable(
-    'candles',
-    'timestamp',
-    if_not_exists => TRUE
-);
+-- Hosts that lack the TimescaleDB extension (e.g. Supabase) skip the call
+-- and keep `candles` as a plain table — query and PK semantics are identical;
+-- only the on-disk partitioning differs. The next migration creates the
+-- timestamp index unconditionally so the schema matches in either case.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb') THEN
+        PERFORM create_hypertable('candles', 'timestamp', if_not_exists => TRUE);
+    END IF;
+END
+$$;

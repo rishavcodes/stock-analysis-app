@@ -99,7 +99,7 @@ From the Render dashboard:
 | Branch | `master` |
 | **Root Directory** | `backend` |
 | Runtime | `Node` |
-| Build Command | `npm ci --include=dev && npx prisma generate && npm run build` |
+| Build Command | `npm ci --include=dev && npx prisma generate && npx prisma migrate deploy && npm run build` |
 | Start Command | `npm start` |
 | Instance Type | `Free` |
 | Health Check Path | `/api/health` |

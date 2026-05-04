@@ -1,4 +1,5 @@
--- No-op migration that records the schema's awareness of the
--- `candles_timestamp_idx` index that TimescaleDB's create_hypertable() added
--- in the previous migration. The index already exists; this migration just
--- pins the prisma <-> db state so future `migrate dev` runs don't see drift.
+-- TimescaleDB's create_hypertable() auto-creates an index on the partitioning
+-- column. On hosts where the previous migration's hypertable conversion was
+-- skipped (e.g. Supabase, no TimescaleDB), we still need that index manually.
+-- IF NOT EXISTS makes this a no-op when the hypertable conversion did run.
+CREATE INDEX IF NOT EXISTS "candles_timestamp_idx" ON "candles" ("timestamp" DESC);
