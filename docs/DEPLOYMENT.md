@@ -99,7 +99,7 @@ From the Render dashboard:
 | Branch | `master` |
 | **Root Directory** | `backend` |
 | Runtime | `Node` |
-| Build Command | `npm ci && npx prisma generate && npm run build` |
+| Build Command | `npm ci --include=dev && npx prisma generate && npm run build` |
 | Start Command | `npm start` |
 | Instance Type | `Free` |
 | Health Check Path | `/api/health` |
@@ -129,6 +129,7 @@ Notes:
 - **Don't set `PORT`** — Render injects it automatically; the app at `src/app.ts` reads `env.PORT`.
 - `ALLOWED_ORIGINS` is comma-separated. Use a placeholder for now; you'll update it after the Vercel deploy in section 4.
 - For the Supabase URLs, make sure you're using the **pgBouncer (pooled)** URL for `DATABASE_URL` and the **direct** URL for `DIRECT_URL`. See `docs/POSTGRES_SETUP.md` if you're unsure which is which.
+- **Why `--include=dev` in the build command?** Setting `NODE_ENV=production` makes plain `npm ci` skip `devDependencies` — which includes TypeScript itself plus every `@types/*` package needed to compile. Without `--include=dev` you'll see a wall of "Cannot find module 'express'" / "Cannot find name 'process'" errors. The runtime image still boots fine because `require('express')` only needs the runtime entry, not the types.
 
 ### 2.4 Click Create Web Service
 

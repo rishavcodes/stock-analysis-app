@@ -16,5 +16,5 @@
   },
   "files": ["src/types/smartapi.d.ts"],
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist"]
+  "exclude": ["node_modules", "dist", "src/**/__tests__/**", "src/**/*.test.ts", "src/scripts/**"]
 }
